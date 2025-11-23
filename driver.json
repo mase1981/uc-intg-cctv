@@ -1,0 +1,66 @@
+{
+  "driver_id": "uc-intg-cctv",
+  "version": "1.0.0",
+  "min_core_api": "1.0.0",
+  "name": {
+    "en": "Security Camera Integration",
+    "de": "Sicherheitskamera Integration",
+    "fr": "Intégration Caméra de Sécurité"
+  },
+  "icon": "uc:camera-cctv",
+  "description": {
+    "en": "Display camera snapshots on your remote screen with 10-second refresh. Works with any camera or NVR that provides an HTTP snapshot URL.",
+    "de": "Kamera-Snapshots auf Ihrem Remote-Bildschirm mit 10-Sekunden-Aktualisierung anzeigen. Funktioniert mit jeder Kamera oder jedem NVR, der eine HTTP-Snapshot-URL bereitstellt.",
+    "fr": "Affichez les instantanés de caméra sur l'écran de votre télécommande avec rafraîchissement de 10 secondes. Fonctionne avec n'importe quelle caméra ou NVR fournissant une URL de snapshot HTTP."
+  },
+  "developer": {
+    "name": "Meir Miyara",
+    "email": "meir.miyara@gmail.com",
+    "url": "https://github.com/mase1981/uc-intg-cctv"
+  },
+  "home_page": "https://github.com/mase1981/uc-intg-cctv",
+  "release_date": "2025-01-01",
+  "port": 9092,
+  "setup_data_schema": {
+    "title": {
+      "en": "Security Camera Setup",
+      "de": "Sicherheitskamera-Setup",
+      "fr": "Configuration Caméra de Sécurité"
+    },
+    "settings": [
+      {
+        "id": "camera_count",
+        "label": {
+          "en": "Number of Cameras",
+          "de": "Anzahl der Kameras",
+          "fr": "Nombre de Caméras"
+        },
+        "field": {
+          "number": {
+            "value": 1,
+            "min": 1,
+            "max": 50,
+            "steps": 1,
+            "decimals": 0,
+            "unit": {
+              "en": "cameras"
+            }
+          }
+        }
+      },
+      {
+        "id": "info",
+        "label": {
+          "en": "Setup Instructions"
+        },
+        "field": {
+          "label": {
+            "value": {
+              "en": "After clicking NEXT, you will be asked to provide a name and snapshot URL for each camera. The snapshot URL must be a complete HTTP/HTTPS address that returns a JPEG or PNG image."
+            }
+          }
+        }
+      }
+    ]
+  }
+}

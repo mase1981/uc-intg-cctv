@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=65.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "uc-intg-cctv"
+dynamic = ["version"]
+description = "Security camera integration for Unfolded Circle Remote"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MPL-2.0"}
+authors = [
+    {name = "Meir Miyara", email = "meir.miyara@gmail.com"}
+]
+keywords = ["unfoldedcircle", "remote", "security", "camera", "cctv", "surveillance", "integration", "smart-home"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: Mozilla Public License 2.0 (MPL-2.0)",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Home Automation"
+]
+
+dependencies = [
+    "aiohttp>=3.8.0",
+    "Pillow>=9.0.0",
+    "pyee>=11.0.0",
+    "ucapi>=0.3.1",
+    "websockets>=12.0",
+    "zeroconf>=0.132.0"
+]
+
+[project.urls]
+Homepage = "https://github.com/mase1981/uc-intg-cctv"
+Issues = "https://github.com/mase1981/uc-intg-cctv/issues"
+
+[tool.setuptools.dynamic]
+version = {attr = "uc_intg_cctv.__version__"}
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["uc_intg_cctv*"]

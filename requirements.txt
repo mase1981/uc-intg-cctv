@@ -1,0 +1,23 @@
+# Core Unfolded Circle API
+ucapi>=0.3.1
+
+# HTTP client for camera communication
+aiohttp>=3.8.0
+
+# Image processing and optimization
+Pillow>=9.0.0
+
+# WebSocket communication
+websockets>=14.0
+
+# Network discovery and mDNS
+zeroconf>=0.120.0
+
+# Optional: Enhanced motion detection
+numpy>=1.21.0
+
+# Optional: Advanced image processing
+opencv-python>=4.5.0
+
+#SSL
+certifi
