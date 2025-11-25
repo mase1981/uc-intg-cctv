@@ -150,39 +150,35 @@ class SecurityCameraMediaPlayer(MediaPlayer):
         return StatusCodes.OK
     
     async def _select_source(self, source_name: str) -> StatusCodes:
-        """Switch to different camera source and auto-start streaming."""
+        """Switch to different camera source."""
         if not source_name or source_name not in self.clients:
             LOG.error(f"Invalid camera source: {source_name}")
             return StatusCodes.BAD_REQUEST
         
         LOG.info(f"Switching to camera: {source_name}")
         
-        # Stop current stream if active
         was_streaming = self.is_streaming
         if was_streaming:
             LOG.info("Stopping previous stream before switching")
             await self.stop_image_streaming()
         
-        # Update current source
         self.current_source = source_name
         self.current_client = self.clients[source_name]
         
         LOG.info(f"Client assigned: {self.current_client is not None}")
         
-        # Update attributes
         self.attributes[Attributes.SOURCE] = source_name
         self.attributes[Attributes.MEDIA_TITLE] = source_name
-        self.attributes[Attributes.STATE] = States.PLAYING
         
-        # Update remote state first
         self._update_remote_state()
         
-        # Give the remote state update time to process
         await asyncio.sleep(0.1)
         
-        # Auto-start streaming when selecting a camera
-        LOG.info(f"Auto-starting stream for selected camera: {source_name}")
-        await self.start_image_streaming()
+        if self.is_on():
+            LOG.info(f"Entity is ON, starting stream for selected camera: {source_name}")
+            await self.start_image_streaming()
+        else:
+            LOG.info(f"Entity is OFF, camera selected but not streaming: {source_name}")
         
         return StatusCodes.OK
     
@@ -239,10 +235,14 @@ class SecurityCameraMediaPlayer(MediaPlayer):
         LOG.info(f"Image stream loop started for {self.current_source}")
         
         consecutive_failures = 0
-        max_failures = 3
+        max_failures = 5
         
         while self.is_streaming and self.current_client:
             try:
+                if not self.is_on():
+                    LOG.info(f"Entity turned OFF during streaming, stopping loop for {self.current_source}")
+                    break
+                
                 LOG.debug(f"Fetching snapshot from {self.current_source}")
                 image_data = await self.current_client.get_snapshot()
                 
@@ -263,13 +263,13 @@ class SecurityCameraMediaPlayer(MediaPlayer):
                         LOG.info(f"Snapshot updated for {self.current_source} ({len(optimized_image)} base64 chars)")
                     else:
                         consecutive_failures += 1
-                        LOG.warning(f"Failed to optimize image for {self.current_source}")
+                        LOG.warning(f"Failed to optimize image for {self.current_source} (failure {consecutive_failures}/{max_failures})")
                 else:
                     consecutive_failures += 1
-                    LOG.warning(f"Failed to get snapshot from {self.current_source}")
+                    LOG.warning(f"Failed to get snapshot from {self.current_source} (failure {consecutive_failures}/{max_failures})")
                 
                 if consecutive_failures >= max_failures:
-                    LOG.error(f"Too many failures for {self.current_source}")
+                    LOG.error(f"Too many consecutive failures for {self.current_source}, marking unavailable but continuing integration")
                     await self._handle_stream_failure()
                     break
                 
@@ -293,7 +293,7 @@ class SecurityCameraMediaPlayer(MediaPlayer):
     
     async def _handle_stream_failure(self) -> None:
         """Handle stream failure."""
-        LOG.error("Handling stream failure")
+        LOG.error(f"Handling stream failure for {self.current_source}")
         self.attributes[Attributes.STATE] = States.UNAVAILABLE
         self.attributes[Attributes.MEDIA_ARTIST] = "Camera Offline"
         self.attributes[Attributes.MEDIA_IMAGE_URL] = ""
