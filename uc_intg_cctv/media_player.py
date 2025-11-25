@@ -150,7 +150,7 @@ class SecurityCameraMediaPlayer(MediaPlayer):
         return StatusCodes.OK
     
     async def _select_source(self, source_name: str) -> StatusCodes:
-        """Switch to different camera source."""
+        """Switch to different camera source and auto-start streaming."""
         if not source_name or source_name not in self.clients:
             LOG.error(f"Invalid camera source: {source_name}")
             return StatusCodes.BAD_REQUEST
@@ -169,16 +169,14 @@ class SecurityCameraMediaPlayer(MediaPlayer):
         
         self.attributes[Attributes.SOURCE] = source_name
         self.attributes[Attributes.MEDIA_TITLE] = source_name
+        self.attributes[Attributes.STATE] = States.PLAYING
         
         self._update_remote_state()
         
         await asyncio.sleep(0.1)
         
-        if self.is_on():
-            LOG.info(f"Entity is ON, starting stream for selected camera: {source_name}")
-            await self.start_image_streaming()
-        else:
-            LOG.info(f"Entity is OFF, camera selected but not streaming: {source_name}")
+        LOG.info(f"Auto-starting stream for selected camera: {source_name}")
+        await self.start_image_streaming()
         
         return StatusCodes.OK
     
@@ -239,10 +237,6 @@ class SecurityCameraMediaPlayer(MediaPlayer):
         
         while self.is_streaming and self.current_client:
             try:
-                if not self.is_on():
-                    LOG.info(f"Entity turned OFF during streaming, stopping loop for {self.current_source}")
-                    break
-                
                 LOG.debug(f"Fetching snapshot from {self.current_source}")
                 image_data = await self.current_client.get_snapshot()
                 
@@ -269,7 +263,7 @@ class SecurityCameraMediaPlayer(MediaPlayer):
                     LOG.warning(f"Failed to get snapshot from {self.current_source} (failure {consecutive_failures}/{max_failures})")
                 
                 if consecutive_failures >= max_failures:
-                    LOG.error(f"Too many consecutive failures for {self.current_source}, marking unavailable but continuing integration")
+                    LOG.error(f"Max failures reached for {self.current_source}, marking unavailable but continuing")
                     await self._handle_stream_failure()
                     break
                 
@@ -292,10 +286,10 @@ class SecurityCameraMediaPlayer(MediaPlayer):
         LOG.info(f"Image stream loop ended for {self.current_source}")
     
     async def _handle_stream_failure(self) -> None:
-        """Handle stream failure."""
+        """Handle stream failure gracefully."""
         LOG.error(f"Handling stream failure for {self.current_source}")
         self.attributes[Attributes.STATE] = States.UNAVAILABLE
-        self.attributes[Attributes.MEDIA_ARTIST] = "Camera Offline"
+        self.attributes[Attributes.MEDIA_ARTIST] = f"{self.current_source} Offline"
         self.attributes[Attributes.MEDIA_IMAGE_URL] = ""
         
         self._update_remote_state()
