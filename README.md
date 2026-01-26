@@ -1,5 +1,6 @@
+# Security Camera Integration for Unfolded Circle Remote 2/3
 
-# Security Camera Integration for Unfolded Circle Remote
+Universal security camera integration that displays camera snapshots directly on your remote's screen with automatic refresh. Works with **any camera or NVR system** that provides an HTTP/HTTPS snapshot URL.
 
 [![GitHub Release](https://img.shields.io/github/v/release/mase1981/uc-intg-cctv?style=flat-square)](https://github.com/mase1981/uc-intg-cctv/releases)
 ![License](https://img.shields.io/badge/license-MPL--2.0-blue?style=flat-square)
@@ -13,12 +14,9 @@
 [![PayPal](https://img.shields.io/badge/PayPal-donate-blue.svg?style=flat-square)](https://paypal.me/mmiyara)
 [![Github Sponsors](https://img.shields.io/badge/GitHub%20Sponsors-30363D?&logo=GitHub-Sponsors&logoColor=EA4AAA&style=flat-square)](https://github.com/sponsors/mase1981)
 
-**Author:** Meir Miyara  
-**Version:** 1.0.0
-
 ---
 
-## 💖 Support This Project
+## ❤️ Support Development ❤️
 
 If you find this integration useful, consider supporting development:
 
@@ -27,121 +25,87 @@ If you find this integration useful, consider supporting development:
 [![PayPal](https://img.shields.io/badge/PayPal-00457C?style=for-the-badge&logo=paypal&logoColor=white)](https://paypal.me/mmiyara)
 
 Your support helps maintain this integration. Thank you! ❤️
+
 ---
 
-## Overview
-
-Universal security camera integration for **Unfolded Circle Remote 2/3** that displays camera snapshots directly on your remote's screen with automatic 10-second refresh. This integration works with **any camera or NVR system** that provides an HTTP/HTTPS snapshot URL - no complex configuration or manufacturer-specific setup required.
+## Features
 
 ### Key Features
 
-✅ **Universal Compatibility** - Works with ANY camera or NVR (Reolink, Hikvision, Dahua, Synology, Blue Iris, Amcrest, Axis, etc.)  
-✅ **Simple Setup** - Just provide camera name and snapshot URL  
-✅ **Multi-Camera Support** - Support for up to 50 cameras in a single integration entity  
-✅ **Automatic Refresh** - 10-second snapshot updates when viewing  
-✅ **Self-Signed SSL Support** - Works with HTTPS cameras using self-signed certificates  
-✅ **Resource Efficient** - Automatically stops pulling snapshots when not viewing  
-✅ **Easy Source Switching** - Change between cameras with the source selector  
+✅ **Universal Compatibility** - Works with ANY camera or NVR (Reolink, Hikvision, Dahua, Synology, Blue Iris, Amcrest, Axis, etc.)
+✅ **Simple Setup** - Just provide camera name and snapshot URL
+✅ **Multi-Camera Support** - Support for up to 50 cameras in a single integration entity
+✅ **Automatic Refresh** - 10-second snapshot updates when viewing
+✅ **Self-Signed SSL Support** - Works with HTTPS cameras using self-signed certificates
+✅ **Resource Efficient** - Automatically stops pulling snapshots when not viewing
+✅ **Easy Source Switching** - Change between cameras with the source selector
 ✅ **Reboot Persistent** - Configuration survives remote reboots
 
----
+### Requirements
 
-## Requirements
-
-### Hardware
-- **Unfolded Circle Remote 2 or Remote 3**
+#### Hardware
+- Unfolded Circle Remote 2 or Remote 3
 - IP cameras or NVR system with HTTP/HTTPS snapshot capability
 - Network connectivity between Remote and cameras
 
-### Camera Requirements
+#### Camera Requirements
 Your camera or NVR **must provide**:
 - HTTP or HTTPS snapshot URL that returns a JPEG or PNG image
 - Network accessibility from the Remote
 - Authentication (if required) embedded in the URL
 
-# CRITICAL - MUST FOLLOW THIS STEP
-### Testing Your Camera URL
+### CRITICAL - Testing Your Camera URL
 
 **CRITICAL**: Before adding cameras to the integration, test your snapshot URL in a web browser:
 
-You must find your specific camera absoloute path URL, google, read your camera documentation etc. Without first validating you can actually see your camera image via your browser, it will 100% guarantee to not work in this integration.
+You must find your specific camera absolute path URL. Without first validating you can actually see your camera image via your browser, it will 100% guarantee to not work in this integration.
+
 1. Open your browser (Chrome, Firefox, Edge, Safari)
 2. Paste your complete snapshot URL (including username/password if needed)
 3. You should see a **single still image** (NOT a video stream)
 4. The image should load each time you refresh the page
 
-Exmaples below in this README file for several camera brands.
-
 **Example of what you should see:**
 - ✅ **Correct**: A JPEG/PNG image that loads instantly
 - ❌ **Incorrect**: Video player, streaming video, or error message
 
-If you see a video stream or player instead of a static image, you need to find your camera's **snapshot endpoint**, not the streaming URL. 
-
-**This will be the first trobuleshooting question: are you able to view your snapshot url in a browser? before any support will be given**
-
----
+If you see a video stream or player instead of a static image, you need to find your camera's **snapshot endpoint**, not the streaming URL.
 
 ## Installation
 
-### Method 1: Direct Installation (Recommended for Testing)
+### Option 1: Remote Web Interface (Recommended)
 
-1. **Download** the latest `.tar.gz` release from [GitHub Releases](https://github.com/mase1981/uc-intg-cctv/releases)
-2. **Upload** via Remote Web Configurator:
-   - Go to `Integrations` → `Add Integration` → `Upload`
-3. **Configure** using the setup wizard
+1. Navigate to the [**Releases**](https://github.com/mase1981/uc-intg-cctv/releases) page
+2. Download the latest `uc-intg-cctv-<version>-aarch64.tar.gz` file
+3. Open your remote's web interface (`http://your-remote-ip`)
+4. Go to **Settings** → **Integrations** → **Add Integration**
+5. Click **Upload** and select the downloaded `.tar.gz` file
 
-### Method 2: Docker Compose (Recommended for Production)
+### Option 2: Docker (Advanced Users)
 
-Create a `docker-compose.yml` file:
+The integration is available as a pre-built Docker image from GitHub Container Registry:
 
+**Docker Compose:**
 ```yaml
-version: '3.8'
-
 services:
-  cctv-integration:
+  uc-intg-cctv:
     image: ghcr.io/mase1981/uc-intg-cctv:latest
     container_name: uc-intg-cctv
-    restart: unless-stopped
     network_mode: host
     volumes:
-      - ./data:/data
+      - </local/path>:/data
     environment:
       - UC_CONFIG_HOME=/data
-      - UC_INTEGRATION_INTERFACE=0.0.0.0
       - UC_INTEGRATION_HTTP_PORT=9092
-      - UC_DISABLE_MDNS_PUBLISH=false
+      - UC_INTEGRATION_INTERFACE=0.0.0.0
+      - PYTHONPATH=/app
+    restart: unless-stopped
 ```
+
 **Docker Run:**
 ```bash
-docker run -d --name=uc-intg-cctv --network host -v </local/path>:/data -e UC_CONFIG_HOME=/data -e UC_INTEGRATION_HTTP_PORT=9090 --restart unless-stopped ghcr.io/mase1981/uc-intg-cctv:latest
+docker run -d --name uc-cctv --restart unless-stopped --network host -v cctv-config:/app/config -e UC_CONFIG_HOME=/app/config -e UC_INTEGRATION_INTERFACE=0.0.0.0 -e UC_INTEGRATION_HTTP_PORT=9092 -e PYTHONPATH=/app ghcr.io/mase1981/uc-intg-cctv:latest
 ```
-Start the integration:
-```bash
-docker-compose up -d
-```
-
-### Method 3: Manual Installation (Development)
-
-```bash
-# Clone the repository
-git clone https://github.com/mase1981/uc-intg-cctv.git
-cd uc-intg-cctv
-
-# Create virtual environment
-python3 -m venv venv
-source venv/bin/activate  # Linux/Mac
-# or
-venv\Scripts\activate  # Windows
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Run the integration
-python -m uc_intg_cctv.driver
-```
-
----
 
 ## Configuration
 
@@ -229,9 +193,7 @@ https://192.168.1.109/proxy/protect/api/cameras/CAMERA_ID/snapshot?ts=0
 4. Add to your activity/page
 5. Done! Select cameras via source selector
 
----
-
-## Usage
+## Using the Integration
 
 ### Viewing Camera Feeds
 
@@ -250,12 +212,10 @@ https://192.168.1.109/proxy/protect/api/cameras/CAMERA_ID/snapshot?ts=0
 
 This is a **snapshot-based viewer**, not a video player, so these features are disabled:
 - ❌ Play/Pause controls
-- ❌ Volume controls  
+- ❌ Volume controls
 - ❌ Fast forward/rewind
 - ❌ PTZ (Pan/Tilt/Zoom) controls
 - ❌ Recording functions
-
----
 
 ## Finding Your Camera's Snapshot URL
 
@@ -290,277 +250,26 @@ If your camera supports ONVIF:
 2. Browse to "Media" → "Snapshot URI"
 3. Copy the snapshot URL
 
----
-
-## Troubleshooting
-
-### Camera Not Connecting
-
-**Problem**: Camera shows "Connection refused" or "Timeout"
-
-**Solutions**:
-- ✅ Verify URL works in a web browser first
-- ✅ Check camera is powered on and network-accessible
-- ✅ Confirm firewall allows access from Remote's IP
-- ✅ Test with HTTP first (if HTTPS fails)
-- ✅ Ensure credentials are correct in URL
-- ✅ Check camera's network settings allow external access
-
-### Authentication Errors
-
-**Problem**: HTTP 401 or 403 errors
-
-**Solutions**:
-- ✅ Verify username/password in URL
-- ✅ Some cameras need base64 encoded credentials
-- ✅ Check if camera requires session/token authentication
-- ✅ Enable "allow anonymous access" if available
-
-### HTTPS/SSL Certificate Issues
-
-**Problem**: SSL verification errors
-
-**Solutions**:
-- ✅ This integration **supports self-signed certificates**
-- ✅ If still failing, try HTTP instead of HTTPS
-- ✅ Check if camera has valid SSL certificate
-- ✅ Ensure camera's SSL/TLS settings allow connections
-
-### No Image Displayed
-
-**Problem**: Entity opens but shows "Nothing is playing"
-
-**Solutions**:
-- ✅ Test URL returns actual image (JPEG/PNG), not HTML page
-- ✅ Check image file size isn't too large (>5MB)
-- ✅ Verify camera returns proper Content-Type header
-- ✅ Try different image quality/resolution settings on camera
-- ✅ Check Remote logs for specific errors
-
-### Slow Refresh or Lag
-
-**Problem**: Images update slowly or lag behind
-
-**Solutions**:
-- Fixed 10-second refresh (by design)
-- ✅ Check network latency to camera
-- ✅ Reduce camera image quality/resolution
-- ✅ Verify camera isn't overloaded with connections
-- ✅ Check Remote's WiFi signal strength
-
-### Entity Shows "OFF" After Setup
-
-**Problem**: Entity visible but shows OFF state
-
-**Solutions**:
-- ✅ Select a camera from SOURCE list first
-- ✅ Entity auto-starts when source is selected
-- ✅ Check logs for initialization errors
-- ✅ Try restarting Remote
-- ✅ Reconfigure integration if issue persists
-
----
-
-## Supported Camera Types
-
-This integration works with **any** device that provides HTTP/HTTPS snapshot URLs:
-
-### IP Cameras
-- Reolink (all models)
-- Hikvision (all models)
-- Dahua (all models)
-- Axis (all models)
-- Amcrest (all models)
-- Foscam (all models)
-- TP-Link/Tapo
-- Wyze (with RTSP firmware)
-- And virtually any other IP camera
-
-### NVR/DVR Systems
-- Blue Iris
-- Synology Surveillance Station
-- QNAP Surveillance
-- UniFi Protect
-- Milestone XProtect
-- Genetec Security Center
-- Any NVR with HTTP API
-
-### Home Automation Platforms
-- Home Assistant camera entities (via proxy)
-- Frigate NVR
-- MotionEye
-- ZoneMinder
-- iSpy/Agent DVR
-
-### Video Doorbells
-- Ring (via Home Assistant)
-- Nest (via Home Assistant)
-- Arlo (via Home Assistant)
-- Eufy (via Home Assistant)
-
----
-
-## Technical Details
-
-### Integration Specifications
-
-| Feature | Value |
-|---------|-------|
-| Refresh Rate | 10 seconds (fixed) |
-| Image Format | JPEG/PNG |
-| Max Image Size | 80KB (auto-optimized) |
-| Target Resolution | 320x240 (optimized for remote) |
-| Max Cameras | 50 per integration instance |
-| SSL Support | Yes (including self-signed) |
-| Authentication | Embedded in URL |
-
-### Network Requirements
-
-- HTTP/HTTPS access to cameras
-- Port access to camera snapshot endpoints
-- No special firewall rules needed
-- mDNS discovery supported
-
-### Resource Usage
-
-- **Idle**: Minimal (no active connections)
-- **Viewing**: One HTTP request every 10 seconds
-- **Multiple Cameras**: Only active camera pulls data
-- **Auto-stop**: Stops pulling when entity is OFF or not viewing
-
----
-
-## Advanced Configuration
-
-### Multiple Integration Instances
-
-You can install multiple instances of this integration:
-- Each instance supports up to 50 cameras
-- Useful for organizing cameras by location/type
-- Each instance appears as a separate entity
-
-### Docker Environment Variables
-
-```yaml
-environment:
-  - UC_CONFIG_HOME=/data              # Config file location
-  - UC_INTEGRATION_INTERFACE=0.0.0.0  # Network interface
-  - UC_INTEGRATION_HTTP_PORT=9092     # Integration port
-  - UC_DISABLE_MDNS_PUBLISH=false     # mDNS discovery
-```
-
-### Development Mode
-
-Run locally for testing:
-```bash
-python -m uc_intg_cctv.driver
-```
-
-Configuration saves to: `./config.json` (project root)
-
-### Reconfiguration
-
-To change camera settings:
-1. Go to Remote Web Configurator
-2. Select integration
-3. Click **Reconfigure**
-4. Update camera settings
-5. Save
-
-**Note**: Reconfiguration replaces existing cameras completely.
-
----
-
-## Security Considerations
-
-### URL Security
-
-**⚠️ IMPORTANT**: Snapshot URLs often contain credentials in plain text.
-
-**Best Practices**:
-- Use dedicated camera user accounts with minimal permissions
-- Don't use admin credentials in URLs
-- Create "snapshot-only" users if camera supports it
-- Use HTTPS when possible
-- Secure your Remote's network access
-
-### Network Security
-
-- Place cameras on isolated VLAN if possible
-- Use firewall rules to restrict camera access
-- Keep camera firmware updated
-- Change default passwords
-- Disable unused camera features/ports
-
----
-
-## Support
-
-### Getting Help
-
-- **GitHub Issues**: [Report bugs or request features](https://github.com/mase1981/uc-intg-cctv/issues)
-- **GitHub Discussions**: [Ask questions and share tips](https://github.com/mase1981/uc-intg-cctv/discussions)
-- **Discord**: best to join Unfolded  Circle Discord Channel
-
-### Before Reporting Issues
-
-Please provide:
-1. Integration version
-2. Remote model (Remote 2 or 3)
-3. Camera brand/model
-4. Snapshot URL format (mask credentials)
-5. Error messages from logs
-6. Steps to reproduce
-
-### Logs Location
-
-**Development**:
-```
-Terminal/console output
-```
-
-**Docker**:
-```bash
-docker logs uc-intg-cctv
-```
-
----
-
-
-## Contributing
-
-Contributions are welcome! Please:
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Test thoroughly
-5. Submit a pull request
-
----
+## Credits
+
+- **Developer**: Meir Miyara
+- **Unfolded Circle**: Remote 2/3 integration framework (ucapi)
+- **Camera Manufacturers**: For providing HTTP/HTTPS snapshot APIs
+- **Community**: Testing and feedback from UC community
 
 ## License
 
-This project is licensed under the **Mozilla Public License 2.0 (MPL-2.0)**.
+This project is licensed under the Mozilla Public License 2.0 (MPL-2.0) - see LICENSE file for details.
 
-See [LICENSE](LICENSE) file for details.
+## Support & Community
 
----
-
-## Acknowledgments
-
-- **Unfolded Circle** for the amazing Remote 2/3 hardware and ucapi framework
-- **Community contributors** who tested and provided feedback
-- **Camera manufacturers** whose APIs made this integration possible
+- **GitHub Issues**: [Report bugs and request features](https://github.com/mase1981/uc-intg-cctv/issues)
+- **GitHub Discussions**: [Community discussions](https://github.com/mase1981/uc-intg-cctv/discussions)
+- **UC Community Forum**: [General discussion and support](https://community.unfoldedcircle.com/)
+- **Developer**: [Meir Miyara](https://www.linkedin.com/in/meirmiyara)
 
 ---
 
-## Disclaimer
+**Made with ❤️ for the Unfolded Circle Community**
 
-This integration is provided "as is" without warranty of any kind. The author is not responsible for any damage or issues arising from its use. Always test with non-critical cameras first.
-
----
-
-**Made with ❤️ by [Meir Miyara](https://github.com/mase1981)**
-
-*If this integration helps you, please consider [sponsoring](https://github.com/sponsors/mase1981)! 🙏*
+**Thank You**: Meir Miyara
