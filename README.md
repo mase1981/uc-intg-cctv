@@ -7,7 +7,7 @@ Universal security camera integration that displays camera snapshots directly on
 [![GitHub Issues](https://img.shields.io/github/issues/mase1981/uc-intg-cctv?style=flat-square)](https://github.com/mase1981/uc-intg-cctv/issues)
 [![GitHub Discussions](https://img.shields.io/github/discussions/mase1981/uc-intg-cctv?style=flat-square)](https://github.com/mase1981/uc-intg-cctv/discussions)
 ![cctv](https://img.shields.io/badge/Security-Cameras-red)
-[![Community Forum](https://img.shields.io/badge/community-forum-blue?style=flat-square)](https://community.unfoldedcircle.com/)
+[![Community Forum](https://img.shields.io/badge/community-forum-blue?style=flat-square)](https://unfolded.community/)
 [![Discord](https://badgen.net/discord/online-members/zGVYf58)](https://discord.gg/zGVYf58)
 ![GitHub Downloads (all assets, all releases)](https://img.shields.io/github/downloads/mase1981/uc-intg-cctv/total?style=flat-square)
 [![Buy Me A Coffee](https://img.shields.io/badge/buy%20me%20a%20coffee-donate-yellow.svg?style=flat-square)](https://buymeacoffee.com/meirmiyara)
@@ -265,7 +265,7 @@ This project is licensed under the Mozilla Public License 2.0 (MPL-2.0) - see LI
 
 - **GitHub Issues**: [Report bugs and request features](https://github.com/mase1981/uc-intg-cctv/issues)
 - **GitHub Discussions**: [Community discussions](https://github.com/mase1981/uc-intg-cctv/discussions)
-- **UC Community Forum**: [General discussion and support](https://community.unfoldedcircle.com/)
+- **UC Community Forum**: [General discussion and support](https://unfolded.community/)
 - **Developer**: [Meir Miyara](https://www.linkedin.com/in/meirmiyara)
 
 ---
