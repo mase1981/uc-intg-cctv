@@ -1,6 +1,6 @@
 {
   "driver_id": "uc-intg-cctv",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "min_core_api": "1.0.0",
   "name": {
     "en": "Security Camera Integration",
@@ -19,8 +19,7 @@
     "url": "https://github.com/mase1981/uc-intg-cctv"
   },
   "home_page": "https://github.com/mase1981/uc-intg-cctv",
-  "release_date": "2025-01-01",
-  "port": 9092,
+  "release_date": "2026-01-31",
   "setup_data_schema": {
     "title": {
       "en": "Security Camera Setup",

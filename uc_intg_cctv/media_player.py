@@ -27,22 +27,23 @@ class SecurityCameraMediaPlayer(MediaPlayer):
         self._api = integration_api
         self.cameras_config = cameras_config
         self.clients: Dict[str, SecurityCameraClient] = {}
-        
+        self.select_entity: Optional[Any] = None  # Reference to camera select entity for sync
+
         for camera_config in cameras_config:
             camera_name = camera_config["name"]
             self.clients[camera_name] = SecurityCameraClient(camera_config)
-        
+
         source_list = [camera["name"] for camera in cameras_config]
         current_source = source_list[0] if source_list else ""
-        
+
         entity_id = "security_cameras"
         entity_name = "Security Cameras"
-        
+
         features = [
             Features.ON_OFF,
             Features.SELECT_SOURCE
         ]
-        
+
         attributes = {
             Attributes.STATE: States.OFF,
             Attributes.MEDIA_TYPE: MediaType.VIDEO,
@@ -52,7 +53,7 @@ class SecurityCameraMediaPlayer(MediaPlayer):
             Attributes.MEDIA_TITLE: current_source,
             Attributes.MEDIA_ARTIST: "Camera View"
         }
-        
+
         super().__init__(
             identifier=entity_id,
             name=entity_name,
@@ -61,18 +62,27 @@ class SecurityCameraMediaPlayer(MediaPlayer):
             device_class="tv",
             cmd_handler=self.handle_command
         )
-        
+
         self.current_source = current_source
         self.current_client: Optional[SecurityCameraClient] = None
         self.is_streaming = False
         self.stream_task: Optional[asyncio.Task] = None
         self.last_image_update = 0
         self.refresh_rate = 10
-        
+
         if current_source and current_source in self.clients:
             self.current_client = self.clients[current_source]
-        
+
         LOG.info(f"Created camera entity with {len(source_list)} cameras (10s refresh)")
+
+    def set_select_entity(self, select_entity: Any) -> None:
+        """Set reference to camera select entity for synchronization.
+
+        Args:
+            select_entity: The CameraSelect entity instance
+        """
+        self.select_entity = select_entity
+        LOG.info("Select entity reference set for synchronization")
     
     async def push_initial_state(self) -> None:
         """Push initial entity state to remote."""
@@ -170,14 +180,18 @@ class SecurityCameraMediaPlayer(MediaPlayer):
         self.attributes[Attributes.SOURCE] = source_name
         self.attributes[Attributes.MEDIA_TITLE] = source_name
         self.attributes[Attributes.STATE] = States.PLAYING
-        
+
         self._update_remote_state()
-        
+
+        # Sync select entity if available
+        if self.select_entity:
+            self.select_entity.update_from_media_player(source_name)
+
         await asyncio.sleep(0.1)
-        
+
         LOG.info(f"Auto-starting stream for selected camera: {source_name}")
         await self.start_image_streaming()
-        
+
         return StatusCodes.OK
     
     def _update_remote_state(self) -> None:

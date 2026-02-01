@@ -1,5 +1,5 @@
 # Core Unfolded Circle API
-ucapi==0.5.1
+ucapi>=0.5.2
 
 # HTTP client for camera communication
 aiohttp>=3.8.0

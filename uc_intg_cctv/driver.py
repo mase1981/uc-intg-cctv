@@ -16,6 +16,7 @@ from ucapi import IntegrationAPI, StatusCodes, Events, DeviceStates
 
 from uc_intg_cctv.client import SecurityCameraClient
 from uc_intg_cctv.media_player import SecurityCameraMediaPlayer, CameraEntityFactory
+from uc_intg_cctv.camera_select import CameraSelect
 from uc_intg_cctv.config import CameraConfig
 from uc_intg_cctv.setup import SecurityCameraSetup
 
@@ -25,6 +26,7 @@ LOG = logging.getLogger(__name__)
 api: IntegrationAPI = None
 _config: CameraConfig = None
 _camera_entity: SecurityCameraMediaPlayer = None
+_select_entity: CameraSelect = None
 _setup_manager: SecurityCameraSetup = None
 
 
@@ -47,16 +49,20 @@ async def _on_disconnect():
 async def _on_subscribe_entities(entity_ids: list[str]):
     """Handle entity subscription - push initial state."""
     LOG.info(f"Entities subscribed: {entity_ids}")
-    
+
     if _camera_entity and _camera_entity.id in entity_ids:
         LOG.info(f"Pushing initial state for {_camera_entity.id}")
         await _camera_entity.push_initial_state()
 
+    if _select_entity and _select_entity.id in entity_ids:
+        LOG.info(f"Pushing initial state for {_select_entity.id}")
+        await _select_entity.push_initial_state()
+
 
 async def _init_integration(force_recreate: bool = False) -> bool:
     """Initialize the integration with existing config."""
-    global _camera_entity
-    
+    global _camera_entity, _select_entity
+
     LOG.info(f"Initializing Security Camera Integration (force_recreate={force_recreate})")
     
     # Reload config from disk (critical for post-setup initialization)
@@ -74,46 +80,74 @@ async def _init_integration(force_recreate: bool = False) -> bool:
             LOG.error(f"Invalid camera configuration: {error_msg}")
             return False
         
-        # If reconfiguring, completely clean up old entity
-        if force_recreate and _camera_entity:
-            LOG.info("Removing old entity for reconfiguration")
-            old_entity_id = _camera_entity.id
-            
-            # Stop streaming and disconnect
-            await _camera_entity.disconnect()
-            
-            # Remove from both available and configured
-            if api.available_entities.contains(old_entity_id):
-                api.available_entities.remove(old_entity_id)
-                LOG.info(f"Removed old entity from available_entities: {old_entity_id}")
-            
-            if api.configured_entities.contains(old_entity_id):
-                api.configured_entities.remove(old_entity_id)
-                LOG.info(f"Removed old entity from configured_entities: {old_entity_id}")
-            
-            _camera_entity = None
-            
+        # If reconfiguring, completely clean up old entities
+        if force_recreate:
+            if _camera_entity:
+                LOG.info("Removing old media player entity for reconfiguration")
+                old_entity_id = _camera_entity.id
+
+                # Stop streaming and disconnect
+                await _camera_entity.disconnect()
+
+                # Remove from both available and configured
+                if api.available_entities.contains(old_entity_id):
+                    api.available_entities.remove(old_entity_id)
+                    LOG.info(f"Removed old media player from available_entities: {old_entity_id}")
+
+                if api.configured_entities.contains(old_entity_id):
+                    api.configured_entities.remove(old_entity_id)
+                    LOG.info(f"Removed old media player from configured_entities: {old_entity_id}")
+
+                _camera_entity = None
+
+            if _select_entity:
+                LOG.info("Removing old select entity for reconfiguration")
+                old_select_id = _select_entity.id
+
+                # Remove from both available and configured
+                if api.available_entities.contains(old_select_id):
+                    api.available_entities.remove(old_select_id)
+                    LOG.info(f"Removed old select entity from available_entities: {old_select_id}")
+
+                if api.configured_entities.contains(old_select_id):
+                    api.configured_entities.remove(old_select_id)
+                    LOG.info(f"Removed old select entity from configured_entities: {old_select_id}")
+
+                _select_entity = None
+
             # Give ucapi time to fully clean up
             await asyncio.sleep(0.5)
         
         # Log the camera names we're about to create
         camera_names = [cam["name"] for cam in cameras_config]
-        LOG.info(f"Creating entity with cameras: {camera_names}")
-        
-        # Create new entity
+        LOG.info(f"Creating entities with cameras: {camera_names}")
+
+        # Create media player entity
         _camera_entity = CameraEntityFactory.create_camera_entity(
             integration=api,
             cameras_config=cameras_config
         )
-        
-        # Add to available entities
+
+        # Create select entity for camera switching
+        _select_entity = CameraSelect(
+            integration_api=api,
+            cameras_config=cameras_config,
+            media_player=_camera_entity
+        )
+
+        # Link entities for bidirectional sync
+        _camera_entity.set_select_entity(_select_entity)
+
+        # Add both entities to available entities
         api.available_entities.add(_camera_entity)
-        
-        LOG.info(f"Created camera entity with {len(cameras_config)} cameras")
+        api.available_entities.add(_select_entity)
+
+        LOG.info(f"Created media player entity with {len(cameras_config)} cameras")
+        LOG.info(f"Created select entity for camera switching")
         LOG.info(f"Entity clients: {list(_camera_entity.clients.keys())}")
-        
+
         await _test_all_cameras(cameras_config)
-        
+
         return True
         
     except Exception as e:
