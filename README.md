@@ -69,6 +69,11 @@ services:
     restart: unless-stopped
 ```
 
+**Docker Run:**
+```bash
+docker run -d --name uc-cctv --restart unless-stopped --network host -v cctv-config:/data -e UC_CONFIG_HOME=/data -e UC_INTEGRATION_INTERFACE=0.0.0.0 -e UC_INTEGRATION_HTTP_PORT=9092 -e PYTHONPATH=/app ghcr.io/mase1981/uc-intg-cctv:latest
+```
+
 ## Setup
 
 ### Synology Surveillance Station
