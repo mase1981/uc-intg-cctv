@@ -1,5 +1,7 @@
 #!/bin/bash
-
-cd /usr/src/app
-pip install --no-cache-dir -q -r requirements.txt
-python uc_intg_cctv/driver.py
+set -e
+cd /app
+if [ -f requirements.txt ]; then
+    pip install --no-cache-dir -q -r requirements.txt
+fi
+python3 -u -m uc_intg_cctv

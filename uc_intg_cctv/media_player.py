@@ -1,348 +1,102 @@
 """
-Security Camera Media Player Entity for Unfolded Circle integration.
+CCTV media player entity for displaying camera snapshots.
 
-:copyright: (c) 2025 by Meir Miyara.
+:copyright: (c) 2026 by Meir Miyara.
 :license: MPL-2.0, see LICENSE for more details.
 """
 
-import asyncio
 import logging
-import time
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-from ucapi import StatusCodes
-from ucapi.media_player import MediaPlayer, Attributes, Features, States, MediaType, Commands
+from ucapi import StatusCodes, media_player
+from ucapi_framework import MediaPlayerEntity
 
-from uc_intg_cctv.client import SecurityCameraClient
-from uc_intg_cctv.config import create_entity_id
+from uc_intg_cctv.config import CCTVConfig
+from uc_intg_cctv.device import CCTVDevice
 
-LOG = logging.getLogger(__name__)
+_LOG = logging.getLogger(__name__)
+
+FEATURES = [
+    media_player.Features.ON_OFF,
+    media_player.Features.SELECT_SOURCE,
+    media_player.Features.MEDIA_IMAGE_URL,
+    media_player.Features.MEDIA_TITLE,
+    media_player.Features.MEDIA_TYPE,
+]
 
 
-class SecurityCameraMediaPlayer(MediaPlayer):
-    """Security Camera Media Player with snapshot viewing."""
-    
-    def __init__(self, integration_api: Any, cameras_config: List[Dict[str, Any]]):
-        """Initialize the camera media player."""
-        self._api = integration_api
-        self.cameras_config = cameras_config
-        self.clients: Dict[str, SecurityCameraClient] = {}
-        self.select_entity: Optional[Any] = None  # Reference to camera select entity for sync
+class CCTVMediaPlayer(MediaPlayerEntity):
+    """Media player entity that displays camera snapshots on the remote screen."""
 
-        for camera_config in cameras_config:
-            camera_name = camera_config["name"]
-            self.clients[camera_name] = SecurityCameraClient(camera_config)
-
-        source_list = [camera["name"] for camera in cameras_config]
-        current_source = source_list[0] if source_list else ""
-
-        entity_id = "security_cameras"
-        entity_name = "Security Cameras"
-
-        features = [
-            Features.ON_OFF,
-            Features.SELECT_SOURCE
-        ]
-
-        attributes = {
-            Attributes.STATE: States.OFF,
-            Attributes.MEDIA_TYPE: MediaType.VIDEO,
-            Attributes.SOURCE_LIST: source_list,
-            Attributes.SOURCE: current_source,
-            Attributes.MEDIA_IMAGE_URL: "",
-            Attributes.MEDIA_TITLE: current_source,
-            Attributes.MEDIA_ARTIST: "Camera View"
-        }
-
+    def __init__(self, device_config: CCTVConfig, device: CCTVDevice) -> None:
+        self._device = device
+        entity_id = f"media_player.{device_config.identifier}"
         super().__init__(
-            identifier=entity_id,
-            name=entity_name,
-            features=features,
-            attributes=attributes,
-            device_class="tv",
-            cmd_handler=self.handle_command
+            entity_id,
+            device_config.name,
+            FEATURES,
+            {
+                media_player.Attributes.STATE: media_player.States.STANDBY,
+                media_player.Attributes.SOURCE: "",
+                media_player.Attributes.SOURCE_LIST: [],
+                media_player.Attributes.MEDIA_IMAGE_URL: "",
+                media_player.Attributes.MEDIA_TITLE: "",
+                media_player.Attributes.MEDIA_TYPE: "video",
+            },
+            device_class=media_player.DeviceClasses.TV,
+            cmd_handler=self._handle_command,
         )
+        self.subscribe_to_device(device)
 
-        self.current_source = current_source
-        self.current_client: Optional[SecurityCameraClient] = None
-        self.is_streaming = False
-        self.stream_task: Optional[asyncio.Task] = None
-        self.last_image_update = 0
-        self.refresh_rate = 10
-
-        if current_source and current_source in self.clients:
-            self.current_client = self.clients[current_source]
-
-        LOG.info(f"Created camera entity with {len(source_list)} cameras (10s refresh)")
-
-    def set_select_entity(self, select_entity: Any) -> None:
-        """Set reference to camera select entity for synchronization.
-
-        Args:
-            select_entity: The CameraSelect entity instance
-        """
-        self.select_entity = select_entity
-        LOG.info("Select entity reference set for synchronization")
-    
-    async def push_initial_state(self) -> None:
-        """Push initial entity state to remote."""
-        LOG.info(f"Pushing initial state for {self.id}")
-        
-        if not self._api or not self._api.configured_entities.contains(self.id):
-            LOG.warning(f"Entity {self.id} not in configured entities yet")
+    async def sync_state(self) -> None:
+        """Sync entity state from device."""
+        if self._device.state == "UNAVAILABLE":
+            self.update({media_player.Attributes.STATE: media_player.States.UNAVAILABLE})
             return
-        
-        attrs_to_update = {
-            Attributes.STATE: States.OFF,
-            Attributes.MEDIA_TYPE: MediaType.VIDEO,
-            Attributes.SOURCE_LIST: self.attributes[Attributes.SOURCE_LIST],
-            Attributes.SOURCE: self.attributes[Attributes.SOURCE],
-            Attributes.MEDIA_IMAGE_URL: "",
-            Attributes.MEDIA_TITLE: self.attributes[Attributes.SOURCE],
-            Attributes.MEDIA_ARTIST: "Camera View"
+
+        camera_names = self._device.camera_names
+        current = self._device.current_camera_name
+
+        state = media_player.States.PLAYING if self._device.streaming else media_player.States.ON
+
+        attrs: dict[str, Any] = {
+            media_player.Attributes.STATE: state,
+            media_player.Attributes.SOURCE_LIST: camera_names,
+            media_player.Attributes.SOURCE: current,
+            media_player.Attributes.MEDIA_TITLE: current,
+            media_player.Attributes.MEDIA_TYPE: "video",
         }
-        
-        self._api.configured_entities.update_attributes(self.id, attrs_to_update)
-        LOG.info(f"Initial state pushed for {self.id}")
-    
-    def is_on(self) -> bool:
-        """Check if camera feed is currently on."""
-        return self.attributes[Attributes.STATE] in [States.PLAYING, States.ON]
-    
-    async def handle_command(self, entity: MediaPlayer, command: str, params: Optional[Dict[str, Any]] = None) -> StatusCodes:
-        """Handle commands from the remote."""
-        LOG.info(f"Command received: {command}, params: {params}")
-        
+
+        if self._device.snapshot_base64:
+            attrs[media_player.Attributes.MEDIA_IMAGE_URL] = self._device.snapshot_base64
+
+        self.update(attrs)
+
+    async def _handle_command(
+        self, entity: Any, cmd_id: str, params: dict[str, Any] | None
+    ) -> StatusCodes:
+        """Handle media player commands."""
         try:
-            if command == Commands.ON:
-                return await self._turn_on()
-            elif command == Commands.OFF:
-                return await self._turn_off()
-            elif command == Commands.SELECT_SOURCE:
-                source = params.get("source") if params else None
-                return await self._select_source(source)
-            else:
-                LOG.warning(f"Unsupported command: {command}")
-                return StatusCodes.BAD_REQUEST
-                
-        except Exception as e:
-            LOG.error(f"Error executing command {command}: {e}", exc_info=True)
-            return StatusCodes.SERVER_ERROR
-    
-    async def _turn_on(self) -> StatusCodes:
-        """Turn on camera snapshot display."""
-        LOG.info("Starting camera snapshot display")
-        
-        if not self.current_client:
-            LOG.error("No camera selected")
-            return StatusCodes.BAD_REQUEST
-        
-        self.attributes[Attributes.STATE] = States.PLAYING
-        self.attributes[Attributes.MEDIA_TITLE] = self.current_source
-        
-        self._update_remote_state()
-        
-        await self.start_image_streaming()
-        
-        return StatusCodes.OK
-    
-    async def _turn_off(self) -> StatusCodes:
-        """Turn off camera snapshot display."""
-        LOG.info("Stopping camera snapshot display")
-        
-        await self.stop_image_streaming()
-        
-        self.attributes[Attributes.STATE] = States.OFF
-        self.attributes[Attributes.MEDIA_IMAGE_URL] = ""
-        
-        self._update_remote_state()
-        
-        return StatusCodes.OK
-    
-    async def _select_source(self, source_name: str) -> StatusCodes:
-        """Switch to different camera source and auto-start streaming."""
-        if not source_name or source_name not in self.clients:
-            LOG.error(f"Invalid camera source: {source_name}")
-            return StatusCodes.BAD_REQUEST
-        
-        LOG.info(f"Switching to camera: {source_name}")
-        
-        was_streaming = self.is_streaming
-        if was_streaming:
-            LOG.info("Stopping previous stream before switching")
-            await self.stop_image_streaming()
-        
-        self.current_source = source_name
-        self.current_client = self.clients[source_name]
-        
-        LOG.info(f"Client assigned: {self.current_client is not None}")
-        
-        self.attributes[Attributes.SOURCE] = source_name
-        self.attributes[Attributes.MEDIA_TITLE] = source_name
-        self.attributes[Attributes.STATE] = States.PLAYING
-
-        self._update_remote_state()
-
-        # Sync select entity if available
-        if self.select_entity:
-            self.select_entity.update_from_media_player(source_name)
-
-        await asyncio.sleep(0.1)
-
-        LOG.info(f"Auto-starting stream for selected camera: {source_name}")
-        await self.start_image_streaming()
-
-        return StatusCodes.OK
-    
-    def _update_remote_state(self) -> None:
-        """Update entity state on remote."""
-        if not self._api or not self._api.configured_entities.contains(self.id):
-            LOG.debug(f"Entity {self.id} not subscribed, skipping state update")
-            return
-        
-        attrs_to_update = {
-            Attributes.STATE: self.attributes[Attributes.STATE],
-            Attributes.SOURCE: self.attributes[Attributes.SOURCE],
-            Attributes.MEDIA_TITLE: self.attributes[Attributes.MEDIA_TITLE],
-            Attributes.MEDIA_IMAGE_URL: self.attributes.get(Attributes.MEDIA_IMAGE_URL, ""),
-            Attributes.MEDIA_ARTIST: self.attributes.get(Attributes.MEDIA_ARTIST, "Camera View")
-        }
-        
-        self._api.configured_entities.update_attributes(self.id, attrs_to_update)
-        LOG.debug(f"Remote state updated: {self.attributes[Attributes.STATE]}")
-    
-    async def start_image_streaming(self) -> None:
-        """Start streaming camera snapshots."""
-        LOG.info(f"start_image_streaming called - is_streaming={self.is_streaming}, current_client={self.current_client is not None}")
-        
-        if self.is_streaming:
-            LOG.warning("Already streaming, skipping start")
-            return
-            
-        if not self.current_client:
-            LOG.error("No current client available, cannot start streaming")
-            return
-        
-        self.is_streaming = True
-        self.stream_task = asyncio.create_task(self._image_stream_loop())
-        LOG.info(f"Started snapshot streaming for {self.current_source} (10s refresh)")
-    
-    async def stop_image_streaming(self) -> None:
-        """Stop streaming camera snapshots."""
-        LOG.info(f"Stopping image streaming for {self.current_source}")
-        self.is_streaming = False
-        
-        if self.stream_task:
-            self.stream_task.cancel()
-            try:
-                await self.stream_task
-            except asyncio.CancelledError:
-                pass
-            self.stream_task = None
-        
-        LOG.info(f"Stopped snapshot streaming for {self.current_source}")
-    
-    async def _image_stream_loop(self) -> None:
-        """Main loop for updating camera snapshots."""
-        LOG.info(f"Image stream loop started for {self.current_source}")
-        
-        consecutive_failures = 0
-        max_failures = 5
-        
-        while self.is_streaming and self.current_client:
-            try:
-                LOG.debug(f"Fetching snapshot from {self.current_source}")
-                image_data = await self.current_client.get_snapshot()
-                
-                if image_data:
-                    LOG.debug(f"Got snapshot: {len(image_data)} bytes")
-                    optimized_image = await self.current_client.optimize_image_for_remote(
-                        image_data, 
-                        max_size_kb=80
-                    )
-                    
-                    if optimized_image:
-                        self.attributes[Attributes.MEDIA_IMAGE_URL] = f"data:image/jpeg;base64,{optimized_image}"
-                        self.last_image_update = time.time()
-                        
-                        self._update_remote_state()
-                        
-                        consecutive_failures = 0
-                        LOG.info(f"Snapshot updated for {self.current_source} ({len(optimized_image)} base64 chars)")
+            match cmd_id:
+                case media_player.Commands.PLAY_PAUSE | media_player.Commands.TOGGLE:
+                    return StatusCodes.OK
+                case media_player.Commands.ON:
+                    if not self._device.streaming:
+                        await self._device.start_streaming()
+                case media_player.Commands.OFF:
+                    await self._device.stop_streaming()
+                case media_player.Commands.SELECT_SOURCE:
+                    source = params.get("source", "") if params else ""
+                    names = self._device.camera_names
+                    if source in names:
+                        await self._device.select_camera(names.index(source))
+                        if not self._device.streaming:
+                            await self._device.start_streaming()
                     else:
-                        consecutive_failures += 1
-                        LOG.warning(f"Failed to optimize image for {self.current_source} (failure {consecutive_failures}/{max_failures})")
-                else:
-                    consecutive_failures += 1
-                    LOG.warning(f"Failed to get snapshot from {self.current_source} (failure {consecutive_failures}/{max_failures})")
-                
-                if consecutive_failures >= max_failures:
-                    LOG.error(f"Max failures reached for {self.current_source}, marking unavailable but continuing")
-                    await self._handle_stream_failure()
-                    break
-                
-                LOG.debug(f"Sleeping for {self.refresh_rate} seconds")
-                await asyncio.sleep(self.refresh_rate)
-                
-            except asyncio.CancelledError:
-                LOG.info("Stream loop cancelled")
-                break
-            except Exception as e:
-                LOG.error(f"Error in snapshot stream loop for {self.current_source}: {e}", exc_info=True)
-                consecutive_failures += 1
-                
-                if consecutive_failures >= max_failures:
-                    await self._handle_stream_failure()
-                    break
-                
-                await asyncio.sleep(5)
-        
-        LOG.info(f"Image stream loop ended for {self.current_source}")
-    
-    async def _handle_stream_failure(self) -> None:
-        """Handle stream failure gracefully."""
-        LOG.error(f"Handling stream failure for {self.current_source}")
-        self.attributes[Attributes.STATE] = States.UNAVAILABLE
-        self.attributes[Attributes.MEDIA_ARTIST] = f"{self.current_source} Offline"
-        self.attributes[Attributes.MEDIA_IMAGE_URL] = ""
-        
-        self._update_remote_state()
-        
-        self.is_streaming = False
-    
-    async def disconnect(self) -> None:
-        """Disconnect from all cameras."""
-        await self.stop_image_streaming()
-        
-        for client in self.clients.values():
-            await client.close()
-        
-        LOG.info("Disconnected all cameras")
-
-
-class CameraEntityFactory:
-    """Factory for creating camera entities."""
-    
-    @staticmethod
-    def create_camera_entity(integration: Any, cameras_config: List[Dict[str, Any]]) -> SecurityCameraMediaPlayer:
-        """Create a multi-source camera entity."""
-        return SecurityCameraMediaPlayer(integration, cameras_config)
-    
-    @staticmethod
-    def validate_cameras_config(cameras_config: List[Dict[str, Any]]) -> tuple[bool, Optional[str]]:
-        """Validate cameras configuration."""
-        if not cameras_config:
-            return False, "At least one camera must be configured"
-        
-        required_fields = ["name", "snapshot_url"]
-        
-        for i, config in enumerate(cameras_config):
-            for field in required_fields:
-                if field not in config or not config[field]:
-                    return False, f"Camera {i+1}: Missing required field '{field}'"
-            
-            url = config["snapshot_url"]
-            if not (url.startswith('http://') or url.startswith('https://')):
-                return False, f"Camera {i+1}: Invalid URL format"
-        
-        return True, None
+                        return StatusCodes.BAD_REQUEST
+                case _:
+                    return StatusCodes.NOT_IMPLEMENTED
+            return StatusCodes.OK
+        except Exception as err:
+            _LOG.error("[%s] Command %s failed: %s", entity.id, cmd_id, err)
+            return StatusCodes.SERVER_ERROR
