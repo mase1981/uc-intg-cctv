@@ -81,11 +81,18 @@ class CCTVDevice(PollingDevice):
     async def establish_connection(self) -> CCTVClient:
         """Connect to camera source (validate manual URLs or authenticate Synology)."""
         stored_sid = self._config.synology_sid if self._config.source_type == "synology" else None
-        self._client = CCTVClient(self._config, stored_sid=stored_sid)
+        device_id = self._config.synology_device_id if self._config.source_type == "synology" else None
+        self._client = CCTVClient(self._config, stored_sid=stored_sid, device_id=device_id)
         if not await self._client.connect():
             await self._client.close()
             self._client = None
             raise ConnectionError(f"Cannot connect to {self._config.source_type} camera source")
+
+        if self._config.source_type == "synology":
+            if self._client.session_id:
+                self._config.synology_sid = self._client.session_id
+            if self._client.device_id:
+                self._config.synology_device_id = self._client.device_id
 
         _LOG.info("%s Connected to %s source with %d cameras",
                   self.log_id, self._config.source_type, len(self._camera_names))
@@ -191,12 +198,12 @@ class CCTVDevice(PollingDevice):
                 self.push_update()
 
     async def disconnect(self) -> None:
-        """Disconnect from camera source."""
-        self._was_streaming = False
+        """Disconnect from camera source. Keep Synology session alive for reconnection."""
+        self._was_streaming = self._streaming
         self._streaming = False
         self._snapshot_base64 = ""
         if self._client:
-            await self._client.close()
+            await self._client.close(logout=False)
             self._client = None
         self._state = "UNAVAILABLE"
         await super().disconnect()

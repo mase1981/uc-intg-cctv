@@ -25,4 +25,5 @@ class CCTVConfig:
     use_https: bool = True
     otp_enabled: bool = False
     synology_sid: str = ""
+    synology_device_id: str = ""
     refresh_rate: int = DEFAULT_REFRESH_RATE

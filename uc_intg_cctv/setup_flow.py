@@ -244,6 +244,7 @@ class CCTVSetupFlow(BaseSetupFlow[CCTVConfig]):
             identifier = f"synology_{host.replace('.', '_')}"
             name = f"Synology ({host})"
             sid = client.session_id or ""
+            device_id = client.device_id or ""
 
             _LOG.info("Synology setup complete: %s with %d cameras", name, len(camera_list))
 
@@ -259,6 +260,7 @@ class CCTVSetupFlow(BaseSetupFlow[CCTVConfig]):
                 use_https=use_https,
                 otp_enabled=otp_enabled,
                 synology_sid=sid,
+                synology_device_id=device_id,
                 refresh_rate=DEFAULT_REFRESH_RATE,
             )
 

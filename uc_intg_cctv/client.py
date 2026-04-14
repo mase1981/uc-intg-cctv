@@ -71,16 +71,27 @@ def _is_valid_image(data: bytes) -> bool:
 class CCTVClient:
     """Unified client for fetching camera snapshots from manual URLs or Synology NAS."""
 
-    def __init__(self, config: Any, otp_code: str | None = None, stored_sid: str | None = None) -> None:
+    def __init__(
+        self,
+        config: Any,
+        otp_code: str | None = None,
+        stored_sid: str | None = None,
+        device_id: str | None = None,
+    ) -> None:
         self._config = config
         self._session: aiohttp.ClientSession | None = None
         self._synology_sid: str | None = stored_sid or None
         self._otp_code: str | None = otp_code
+        self._device_id: str | None = device_id or None
         self._reauth_lock = asyncio.Lock()
 
     @property
     def session_id(self) -> str | None:
         return self._synology_sid
+
+    @property
+    def device_id(self) -> str | None:
+        return self._device_id
 
     async def connect(self) -> bool:
         """Create HTTP session and authenticate if Synology."""
@@ -251,10 +262,14 @@ class CCTVClient:
                 "account": self._config.username,
                 "passwd": self._config.password,
                 "session": "SurveillanceStation",
+                "enable_device_token": "yes",
+                "device_name": "UnfoldedCircle",
             }
 
             if self._otp_code:
                 params["otp_code"] = self._otp_code
+            elif self._device_id:
+                params["device_id"] = self._device_id
 
             async with self._session.get(url, params=params) as resp:
                 if resp.status != 200:
@@ -276,7 +291,11 @@ class CCTVClient:
                         raise ValueError("OTP code is incorrect")
                     return False
 
-                self._synology_sid = data["data"]["sid"]
+                resp_data = data["data"]
+                self._synology_sid = resp_data["sid"]
+                if "did" in resp_data:
+                    self._device_id = resp_data["did"]
+                    _LOG.debug("Synology device token obtained for %s", self._config.host)
                 _LOG.info("Synology authenticated to %s", self._config.host)
                 return True
 
