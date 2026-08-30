@@ -216,6 +216,9 @@ class CCTVSetupFlow(BaseSetupFlow[CCTVConfig]):
 
         otp_enabled = bool(otp_code)
 
+        existing = self.selected_config_entry
+        stored_device_id = getattr(existing, "synology_device_id", "") if existing else ""
+
         temp_config = CCTVConfig(
             identifier="temp",
             name="temp",
@@ -226,9 +229,14 @@ class CCTVSetupFlow(BaseSetupFlow[CCTVConfig]):
             password=password,
             use_https=use_https,
             otp_enabled=otp_enabled,
+            synology_device_id=stored_device_id,
         )
 
-        client = CCTVClient(temp_config, otp_code=otp_code if otp_code else None)
+        client = CCTVClient(
+            temp_config,
+            otp_code=otp_code if otp_code else None,
+            device_id=stored_device_id or None,
+        )
         try:
             if not await client.connect():
                 raise ValueError(f"Cannot authenticate to Synology NAS at {host}:{port}")
@@ -245,6 +253,7 @@ class CCTVSetupFlow(BaseSetupFlow[CCTVConfig]):
             name = f"Synology ({host})"
             sid = client.session_id or ""
             device_id = client.device_id or ""
+            syno_token = client.syno_token or ""
 
             _LOG.info("Synology setup complete: %s with %d cameras", name, len(camera_list))
 
@@ -261,6 +270,7 @@ class CCTVSetupFlow(BaseSetupFlow[CCTVConfig]):
                 otp_enabled=otp_enabled,
                 synology_sid=sid,
                 synology_device_id=device_id,
+                synology_syno_token=syno_token,
                 refresh_rate=DEFAULT_REFRESH_RATE,
             )
 

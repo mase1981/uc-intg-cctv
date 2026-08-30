@@ -4,6 +4,11 @@ Unified snapshot client for manual HTTP cameras and Synology Surveillance Statio
 H.264 cameras: GetSnapshot API (direct JPEG from Synology).
 H.265 cameras: RTSP frame extraction via PyAV (GetLiveViewPath provides auth'd RTSP URL).
 
+Session recovery mirrors the MiyaraHub synology-manager mobile app: every Synology
+call runs through a single choke point that silently re-authenticates on session-expiry
+codes and retries once, uses a persisted device token to skip 2FA on re-login, sends the
+SynoToken on every request, and treats auto-block/locked codes as terminal (no retry).
+
 :copyright: (c) 2026 by Meir Miyara.
 :license: MPL-2.0, see LICENSE for more details.
 """
@@ -14,7 +19,7 @@ import io
 import json as _json
 import logging
 import ssl
-from typing import Any
+from typing import Any, Callable
 
 import aiohttp
 import av
@@ -27,10 +32,25 @@ from uc_intg_cctv.const import (
     MAX_IMAGE_SIZE_KB,
     SOURCE_SYNOLOGY,
     SYNOLOGY_AUTH_API,
+    SYNOLOGY_AUTH_VERSION,
+    SYNOLOGY_AUTH_VERSION_FALLBACK,
+    SYNOLOGY_DEVICE_NAME,
+    SYNOLOGY_DEVICE_TOKEN_FLOOR,
     SYNOLOGY_ENTRY_API,
+    SYNOLOGY_QUERY_API,
+    SYNOLOGY_REAUTH_CODES,
+    SYNOLOGY_TERMINAL_CODES,
 )
 
 _LOG = logging.getLogger(__name__)
+
+
+class SynologyError(Exception):
+    """A Synology API call returned success=false with an error code."""
+
+    def __init__(self, code: int, message: str = "") -> None:
+        self.code = code
+        super().__init__(f"Synology API error {code}: {message}" if message else f"Synology API error {code}")
 
 
 def _create_ssl_context() -> ssl.SSLContext:
@@ -77,13 +97,19 @@ class CCTVClient:
         otp_code: str | None = None,
         stored_sid: str | None = None,
         device_id: str | None = None,
+        stored_syno_token: str | None = None,
+        on_auth: Callable[[str, str | None, str | None], None] | None = None,
     ) -> None:
         self._config = config
         self._session: aiohttp.ClientSession | None = None
         self._synology_sid: str | None = stored_sid or None
+        self._synology_syno_token: str | None = stored_syno_token or None
         self._otp_code: str | None = otp_code
         self._device_id: str | None = device_id or None
+        self._on_auth = on_auth
+        self._auth_version: int | None = None
         self._reauth_lock = asyncio.Lock()
+        self._last_error_terminal: bool = False
 
     @property
     def session_id(self) -> str | None:
@@ -93,27 +119,40 @@ class CCTVClient:
     def device_id(self) -> str | None:
         return self._device_id
 
+    @property
+    def syno_token(self) -> str | None:
+        return self._synology_syno_token
+
+    @property
+    def last_error_terminal(self) -> bool:
+        """True when the last auth failure was an auto-block/locked account (do not hammer)."""
+        return self._last_error_terminal
+
     async def connect(self) -> bool:
         """Create HTTP session and authenticate if Synology."""
         try:
-            connector = aiohttp.TCPConnector(
-                limit=5, limit_per_host=2, ssl=_create_ssl_context()
-            )
-            self._session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=15, connect=5),
-                connector=connector,
-            )
+            if self._session is None or self._session.closed:
+                connector = aiohttp.TCPConnector(
+                    limit=5, limit_per_host=2, ssl=_create_ssl_context()
+                )
+                self._session = aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=15, connect=5),
+                    connector=connector,
+                )
 
             if self._config.source_type == SOURCE_SYNOLOGY:
+                if self._synology_sid and await self._synology_test_sid():
+                    _LOG.info("Reusing stored Synology session for %s", self._config.host)
+                    self._notify_auth()
+                    return True
                 if self._synology_sid:
-                    if await self._synology_test_sid():
-                        _LOG.info("Reusing stored Synology session for %s", self._config.host)
-                        return True
                     _LOG.warning("Stored SID expired, re-authenticating")
-                    self._synology_sid = None
+                self._synology_sid = None
                 return await self._synology_authenticate()
 
             return True
+        except ValueError:
+            raise
         except Exception as err:
             _LOG.error("Client connect failed: %s", err)
             return False
@@ -135,7 +174,7 @@ class CCTVClient:
         """Fetch snapshot for a camera entry.
 
         Synology H.265: RTSP first, GetSnapshot fallback.
-        Synology H.264: GetSnapshot first, RTSP fallback (with re-auth on 401).
+        Synology H.264: GetSnapshot first, RTSP fallback.
         Manual: HTTP GET to snapshot URL.
         """
         if not self._session:
@@ -167,37 +206,25 @@ class CCTVClient:
             return []
 
         try:
-            url = self._synology_url(SYNOLOGY_ENTRY_API)
-            params = {
-                "api": "SYNO.SurveillanceStation.Camera",
-                "method": "List",
-                "version": "9",
-                "_sid": self._synology_sid,
-            }
+            data = await self._synology_json(
+                "SYNO.SurveillanceStation.Camera",
+                "List",
+                9,
+                {},
+            )
+            cameras_raw = data.get("cameras", [])
+            cameras = []
+            for cam in cameras_raw:
+                cameras.append({
+                    "id": cam.get("id"),
+                    "name": cam.get("newName", cam.get("name", f"Camera {cam.get('id')}")),
+                    "status": cam.get("status", 0),
+                    "model": cam.get("model", ""),
+                    "video_codec": cam.get("videoCodec", 0),
+                })
 
-            async with self._session.get(url, params=params) as resp:
-                if resp.status != 200:
-                    _LOG.error("Camera list request failed: HTTP %d", resp.status)
-                    return []
-
-                data = await resp.json(content_type=None)
-                if not data.get("success"):
-                    _LOG.error("Camera list API error: %s", data.get("error"))
-                    return []
-
-                cameras_raw = data.get("data", {}).get("cameras", [])
-                cameras = []
-                for cam in cameras_raw:
-                    cameras.append({
-                        "id": cam.get("id"),
-                        "name": cam.get("newName", cam.get("name", f"Camera {cam.get('id')}")),
-                        "status": cam.get("status", 0),
-                        "model": cam.get("model", ""),
-                        "video_codec": cam.get("videoCodec", 0),
-                    })
-
-                _LOG.info("Discovered %d cameras from Synology", len(cameras))
-                return cameras
+            _LOG.info("Discovered %d cameras from Synology", len(cameras))
+            return cameras
 
         except Exception as err:
             _LOG.error("Camera discovery failed: %s", err)
@@ -228,24 +255,74 @@ class CCTVClient:
         scheme = "https" if self._config.use_https else "http"
         return f"{scheme}://{self._config.host}:{self._config.port}{path}"
 
+    def _auth_headers(self) -> dict[str, str]:
+        if self._synology_syno_token:
+            return {"X-SYNO-TOKEN": self._synology_syno_token}
+        return {}
+
+    def _session_params(self, base: dict[str, Any]) -> dict[str, Any]:
+        params = dict(base)
+        if self._synology_sid:
+            params["_sid"] = self._synology_sid
+        if self._synology_syno_token:
+            params["SynoToken"] = self._synology_syno_token
+        return params
+
+    def _notify_auth(self) -> None:
+        if self._on_auth:
+            try:
+                self._on_auth(self._synology_sid, self._device_id, self._synology_syno_token)
+            except Exception as err:
+                _LOG.debug("on_auth callback failed: %s", err)
+
+    async def _negotiate_auth_version(self) -> int:
+        """Query SYNO.API.Info for the server-supported SYNO.API.Auth version."""
+        if not self._session:
+            return SYNOLOGY_AUTH_VERSION_FALLBACK
+        try:
+            url = self._synology_url(SYNOLOGY_QUERY_API)
+            params = {
+                "api": "SYNO.API.Info",
+                "method": "query",
+                "version": "1",
+                "query": "SYNO.API.Auth",
+            }
+            async with self._session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    return SYNOLOGY_AUTH_VERSION_FALLBACK
+                data = await resp.json(content_type=None)
+            auth = data.get("data", {}).get("SYNO.API.Auth", {})
+            max_version = auth.get("maxVersion")
+            min_version = auth.get("minVersion")
+            if not isinstance(max_version, int):
+                return SYNOLOGY_AUTH_VERSION_FALLBACK
+            version = min(SYNOLOGY_AUTH_VERSION, max_version)
+            if isinstance(min_version, int) and version < min_version:
+                version = min_version
+            if max_version >= SYNOLOGY_DEVICE_TOKEN_FLOOR and version < SYNOLOGY_DEVICE_TOKEN_FLOOR:
+                version = SYNOLOGY_DEVICE_TOKEN_FLOOR
+            version = min(version, max_version)
+            _LOG.info("Negotiated SYNO.API.Auth v%d (server min=%s max=%s)",
+                      version, min_version, max_version)
+            return max(version, 1)
+        except Exception as err:
+            _LOG.debug("Auth version negotiation failed: %s, using v%d",
+                       err, SYNOLOGY_AUTH_VERSION_FALLBACK)
+            return SYNOLOGY_AUTH_VERSION_FALLBACK
+
     async def _synology_test_sid(self) -> bool:
         """Test if stored SID is still valid."""
         if not self._session or not self._synology_sid:
             return False
         try:
-            url = self._synology_url(SYNOLOGY_ENTRY_API)
-            params = {
-                "api": "SYNO.SurveillanceStation.Camera",
-                "method": "List",
-                "version": "1",
-                "limit": "1",
-                "_sid": self._synology_sid,
-            }
-            async with self._session.get(url, params=params) as resp:
-                if resp.status != 200:
-                    return False
-                data = await resp.json(content_type=None)
-                return data.get("success", False)
+            data = await self._synology_json(
+                "SYNO.SurveillanceStation.Camera",
+                "List",
+                1,
+                {"limit": "1"},
+                allow_reauth=False,
+            )
+            return data is not None
         except Exception:
             return False
 
@@ -253,232 +330,251 @@ class CCTVClient:
         if not self._session:
             return False
 
-        try:
-            url = self._synology_url(SYNOLOGY_AUTH_API)
-            params = {
-                "api": "SYNO.API.Auth",
-                "method": "Login",
-                "version": "6",
-                "account": self._config.username,
-                "passwd": self._config.password,
-                "session": "SurveillanceStation",
-                "enable_device_token": "yes",
-                "device_name": "UnfoldedCircle",
-            }
+        if self._auth_version is None:
+            self._auth_version = await self._negotiate_auth_version()
 
-            if self._otp_code:
-                params["otp_code"] = self._otp_code
-            elif self._device_id:
-                params["device_id"] = self._device_id
+        url = self._synology_url(SYNOLOGY_AUTH_API)
+        params = {
+            "api": "SYNO.API.Auth",
+            "method": "login",
+            "version": str(self._auth_version),
+            "account": self._config.username,
+            "passwd": self._config.password,
+            "session": "SurveillanceStation",
+            "format": "sid",
+            "enable_device_token": "yes",
+            "enable_syno_token": "yes",
+            "device_name": SYNOLOGY_DEVICE_NAME,
+        }
 
-            async with self._session.get(url, params=params) as resp:
-                if resp.status != 200:
-                    _LOG.error("Synology auth failed: HTTP %d", resp.status)
-                    return False
+        if self._otp_code:
+            params["otp_code"] = self._otp_code
+        if self._device_id:
+            params["device_id"] = self._device_id
 
-                data = await resp.json(content_type=None)
-                if not data.get("success"):
-                    error = data.get("error", {})
-                    code = error.get("code", 0)
-                    _LOG.error("Synology auth error: code %s", code)
-                    if code == 403:
-                        raise ValueError("2FA is enabled but no OTP code was provided")
-                    if code == 400:
-                        raise ValueError("Invalid username or password")
-                    if code == 401:
-                        raise ValueError("Account disabled or locked")
-                    if code == 404:
-                        raise ValueError("OTP code is incorrect")
-                    return False
+        async with self._session.get(url, params=params) as resp:
+            if resp.status != 200:
+                _LOG.error("Synology auth failed: HTTP %d", resp.status)
+                raise SynologyError(0, f"HTTP {resp.status}")
 
-                resp_data = data["data"]
-                self._synology_sid = resp_data["sid"]
-                if "did" in resp_data:
-                    self._device_id = resp_data["did"]
-                    _LOG.debug("Synology device token obtained for %s", self._config.host)
-                _LOG.info("Synology authenticated to %s", self._config.host)
-                return True
+            data = await resp.json(content_type=None)
 
-        except ValueError:
-            raise
-        except Exception as err:
-            _LOG.error("Synology authentication failed: %s", err)
-            return False
+        if not data.get("success"):
+            code = data.get("error", {}).get("code", 0)
+            self._last_error_terminal = code in SYNOLOGY_TERMINAL_CODES
+            _LOG.error("Synology auth error: code %s", code)
+            if code == 403:
+                raise ValueError("2FA is enabled but no OTP code was provided")
+            if code == 404:
+                raise ValueError("OTP code is incorrect")
+            if code == 400:
+                raise ValueError("Invalid username or password")
+            if code in (401, 411):
+                raise ValueError("Account disabled or locked")
+            if code == 407:
+                raise ValueError(
+                    "Too many failed attempts - DSM temporarily blocked this device. "
+                    "Wait for the block to clear or unblock it in DSM."
+                )
+            raise SynologyError(code)
+
+        resp_data = data["data"]
+        self._synology_sid = resp_data["sid"]
+        did = resp_data.get("did") or resp_data.get("device_id")
+        if did:
+            self._device_id = did
+        syno_token = resp_data.get("synotoken")
+        if syno_token is not None:
+            self._synology_syno_token = syno_token
+        self._last_error_terminal = False
+        _LOG.info("Synology authenticated to %s", self._config.host)
+        self._notify_auth()
+        return True
 
     async def _synology_logout(self) -> None:
         if not self._session or not self._synology_sid:
             return
 
         url = self._synology_url(SYNOLOGY_AUTH_API)
-        params = {
+        params = self._session_params({
             "api": "SYNO.API.Auth",
-            "method": "Logout",
-            "version": "6",
+            "method": "logout",
+            "version": str(self._auth_version or SYNOLOGY_AUTH_VERSION_FALLBACK),
             "session": "SurveillanceStation",
-            "_sid": self._synology_sid,
-        }
+        })
 
         try:
-            async with self._session.get(url, params=params):
+            async with self._session.get(url, params=params, headers=self._auth_headers()):
                 pass
         except Exception:
             pass
 
-    async def _try_reauth(self) -> bool:
-        """Re-authenticate with Synology when session expires."""
+    async def _reauth(self, stale_sid: str | None) -> bool:
+        """Re-authenticate when the session expires. Single-flight via the reauth lock."""
         async with self._reauth_lock:
-            if await self._synology_test_sid():
+            if self._synology_sid and self._synology_sid != stale_sid:
                 return True
             _LOG.info("Synology session expired, re-authenticating")
             self._synology_sid = None
-            return await self._synology_authenticate()
+            try:
+                return await self._synology_authenticate()
+            except (ValueError, SynologyError) as err:
+                _LOG.warning("Re-authentication failed: %s", err)
+                return False
+
+    async def _synology_json(
+        self,
+        api: str,
+        method: str,
+        version: int,
+        params: dict[str, Any],
+        *,
+        allow_reauth: bool = True,
+        _retrying: bool = False,
+    ) -> dict[str, Any]:
+        """JSON Synology API call funnelled through the single session-recovery choke point.
+
+        Returns the ``data`` object on success. Raises SynologyError on failure (after one
+        silent re-login + retry for session-expiry codes).
+        """
+        if not self._session:
+            raise SynologyError(0, "No HTTP session")
+
+        stale_sid = self._synology_sid
+        url = self._synology_url(SYNOLOGY_ENTRY_API)
+        query = self._session_params({
+            "api": api,
+            "method": method,
+            "version": str(version),
+        })
+        query.update(params)
+
+        async with self._session.get(url, params=query, headers=self._auth_headers()) as resp:
+            if resp.status != 200:
+                raise SynologyError(0, f"HTTP {resp.status}")
+            data = await resp.json(content_type=None)
+
+        if data.get("success"):
+            return data.get("data", {}) or {}
+
+        code = data.get("error", {}).get("code", 0)
+        if code in SYNOLOGY_TERMINAL_CODES:
+            self._last_error_terminal = True
+        if (
+            allow_reauth
+            and not _retrying
+            and code in SYNOLOGY_REAUTH_CODES
+            and await self._reauth(stale_sid)
+        ):
+            return await self._synology_json(
+                api, method, version, params, allow_reauth=True, _retrying=True
+            )
+        raise SynologyError(code)
+
+    async def _synology_binary(
+        self,
+        api: str,
+        method: str,
+        version: int,
+        params: dict[str, Any],
+        *,
+        _retrying: bool = False,
+    ) -> bytes | None:
+        """Binary (image) Synology API call with the same session-recovery choke point."""
+        if not self._session:
+            return None
+
+        stale_sid = self._synology_sid
+        url = self._synology_url(SYNOLOGY_ENTRY_API)
+        query = self._session_params({
+            "api": api,
+            "method": method,
+            "version": str(version),
+        })
+        query.update(params)
+
+        try:
+            async with self._session.get(url, params=query, headers=self._auth_headers()) as resp:
+                if resp.status != 200:
+                    _LOG.debug("%s.%s HTTP %d", api, method, resp.status)
+                    return None
+                content_type = resp.headers.get("Content-Type", "")
+                data = await resp.read()
+        except Exception as err:
+            _LOG.debug("%s.%s exception: %s", api, method, err)
+            return None
+
+        if not data:
+            return None
+
+        if "json" in content_type:
+            code = 0
+            try:
+                code = _json.loads(data).get("error", {}).get("code", 0)
+            except Exception:
+                pass
+            if code in SYNOLOGY_TERMINAL_CODES:
+                self._last_error_terminal = True
+            if not _retrying and code in SYNOLOGY_REAUTH_CODES and await self._reauth(stale_sid):
+                return await self._synology_binary(api, method, version, params, _retrying=True)
+            _LOG.debug("%s.%s error code %s", api, method, code)
+            return None
+
+        if "image" in content_type or _is_valid_image(data):
+            return data
+
+        _LOG.debug("%s.%s invalid data (%d bytes, type=%s)", api, method, len(data), content_type)
+        return None
 
     async def _synology_get_snapshot(self, camera_id: int) -> bytes | None:
-        """Get snapshot via Synology GetSnapshot API (works for H.264 cameras)."""
+        """Get snapshot via GetSnapshot API, falling back to a lower stream then TakeSnapshot."""
         if not self._session or not self._synology_sid:
             return None
 
-        data = await self._synology_try_snapshot_api(camera_id)
-        if data:
-            return data
-
-        if data is False:
-            if not await self._try_reauth():
-                return None
-            data = await self._synology_try_snapshot_api(camera_id)
+        for cam_stm in (1, 2):
+            data = await self._synology_binary(
+                "SYNO.SurveillanceStation.Camera",
+                "GetSnapshot",
+                9,
+                {"cameraId": camera_id, "camStm": cam_stm, "profileType": 0},
+            )
             if data:
+                _LOG.debug("GetSnapshot(stm=%d) success for camera %d: %d bytes",
+                           cam_stm, camera_id, len(data))
                 return data
 
-        data = await self._synology_try_snapshot_api(camera_id, cam_stm=2)
-        if data:
-            return data
-
-        data = await self._synology_take_snapshot(camera_id)
-        if data:
-            return data
-
-        return None
-
-    async def _synology_try_snapshot_api(
-        self, camera_id: int, cam_stm: int = 1
-    ) -> bytes | None | bool:
-        """Try the GetSnapshot API. Returns bytes on success, False on auth error, None on other failure."""
-        url = self._synology_url(SYNOLOGY_ENTRY_API)
-        params = {
-            "api": "SYNO.SurveillanceStation.Camera",
-            "method": "GetSnapshot",
-            "version": "9",
-            "cameraId": camera_id,
-            "camStm": cam_stm,
-            "profileType": 0,
-            "_sid": self._synology_sid,
-        }
-
-        try:
-            async with self._session.get(url, params=params) as resp:
-                if resp.status != 200:
-                    _LOG.debug("GetSnapshot(stm=%d) HTTP %d for camera %d",
-                               cam_stm, resp.status, camera_id)
-                    return None
-
-                content_type = resp.headers.get("Content-Type", "")
-                data = await resp.read()
-
-                if not data:
-                    _LOG.debug("GetSnapshot(stm=%d) empty for camera %d", cam_stm, camera_id)
-                    return None
-
-                if "json" in content_type:
-                    try:
-                        err = _json.loads(data)
-                        error_code = err.get("error", {}).get("code", 0)
-                        _LOG.debug("GetSnapshot(stm=%d) error for camera %d: %s",
-                                   cam_stm, camera_id, err)
-                        if error_code == 401:
-                            return False
-                    except Exception:
-                        pass
-                    return None
-
-                if "image" in content_type or _is_valid_image(data):
-                    _LOG.debug("GetSnapshot(stm=%d) success for camera %d: %d bytes",
-                               cam_stm, camera_id, len(data))
-                    return data
-
-                _LOG.debug("GetSnapshot(stm=%d) invalid data for camera %d: %d bytes, type=%s",
-                           cam_stm, camera_id, len(data), content_type)
-                return None
-
-        except Exception as err:
-            _LOG.debug("GetSnapshot(stm=%d) exception for camera %d: %s", cam_stm, camera_id, err)
-            return None
+        return await self._synology_take_snapshot(camera_id)
 
     async def _synology_take_snapshot(self, camera_id: int) -> bytes | None:
         """Two-step snapshot: TakeSnapshot then LoadSnapshot."""
         if not self._session or not self._synology_sid:
             return None
 
-        url = self._synology_url(SYNOLOGY_ENTRY_API)
-
-        take_params = {
-            "api": "SYNO.SurveillanceStation.SnapShot",
-            "method": "TakeSnapshot",
-            "version": "1",
-            "camId": camera_id,
-            "blSave": "false",
-            "dsId": 0,
-            "_sid": self._synology_sid,
-        }
-
         try:
-            async with self._session.get(url, params=take_params) as resp:
-                if resp.status != 200:
-                    _LOG.debug("TakeSnapshot HTTP %d for camera %d", resp.status, camera_id)
-                    return None
-
-                result = await resp.json(content_type=None)
-                if not result.get("success"):
-                    _LOG.debug("TakeSnapshot failed for camera %d: %s",
-                               camera_id, result.get("error"))
-                    return None
-
-                snapshot_data = result.get("data", {})
-                snapshot_id = snapshot_data.get("id")
-                if not snapshot_id:
-                    _LOG.debug("TakeSnapshot no ID for camera %d", camera_id)
-                    return None
-
-        except Exception as err:
-            _LOG.debug("TakeSnapshot exception for camera %d: %s", camera_id, err)
+            result = await self._synology_json(
+                "SYNO.SurveillanceStation.SnapShot",
+                "TakeSnapshot",
+                1,
+                {"camId": camera_id, "blSave": "false", "dsId": 0},
+            )
+        except SynologyError as err:
+            _LOG.debug("TakeSnapshot failed for camera %d: %s", camera_id, err)
             return None
 
-        load_params = {
-            "api": "SYNO.SurveillanceStation.SnapShot",
-            "method": "LoadSnapshot",
-            "version": "1",
-            "id": snapshot_id,
-            "imgSize": 0,
-            "_sid": self._synology_sid,
-        }
-
-        try:
-            async with self._session.get(url, params=load_params) as resp:
-                if resp.status != 200:
-                    _LOG.debug("LoadSnapshot HTTP %d for camera %d", resp.status, camera_id)
-                    return None
-
-                data = await resp.read()
-                if data and _is_valid_image(data):
-                    _LOG.debug("TakeSnapshot+Load success for camera %d: %d bytes",
-                               camera_id, len(data))
-                    return data
-
-                _LOG.debug("LoadSnapshot invalid data for camera %d", camera_id)
-                return None
-
-        except Exception as err:
-            _LOG.debug("LoadSnapshot exception for camera %d: %s", camera_id, err)
+        snapshot_id = result.get("id")
+        if not snapshot_id:
+            _LOG.debug("TakeSnapshot no ID for camera %d", camera_id)
             return None
+
+        data = await self._synology_binary(
+            "SYNO.SurveillanceStation.SnapShot",
+            "LoadSnapshot",
+            1,
+            {"id": snapshot_id, "imgSize": 0},
+        )
+        if data:
+            _LOG.debug("TakeSnapshot+Load success for camera %d: %d bytes", camera_id, len(data))
+        return data
 
     # --- RTSP Frame Extraction (H.265 cameras) ---
 
@@ -487,24 +583,19 @@ class CCTVClient:
         if not self._session or not self._synology_sid:
             return None
         try:
-            url = self._synology_url(SYNOLOGY_ENTRY_API)
-            params = {
-                "api": "SYNO.SurveillanceStation.Camera",
-                "method": "GetLiveViewPath",
-                "version": "9",
-                "idList": str(camera_id),
-                "_sid": self._synology_sid,
-            }
-            async with self._session.get(url, params=params) as resp:
-                if resp.status != 200:
-                    return None
-                data = await resp.json(content_type=None)
-                if not data.get("success"):
-                    return None
-                for p in data.get("data", []):
-                    rtsp = p.get("rtspPath", "")
-                    if rtsp:
-                        return rtsp
+            data = await self._synology_json(
+                "SYNO.SurveillanceStation.Camera",
+                "GetLiveViewPath",
+                9,
+                {"idList": str(camera_id)},
+            )
+            paths = data.get("_list") if isinstance(data, dict) else None
+            if paths is None and isinstance(data, list):
+                paths = data
+            for p in paths or []:
+                rtsp = p.get("rtspPath", "")
+                if rtsp:
+                    return rtsp
         except Exception as err:
             _LOG.debug("GetLiveViewPath failed for camera %d: %s", camera_id, err)
         return None

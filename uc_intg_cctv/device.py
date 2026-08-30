@@ -5,10 +5,11 @@ CCTV device implementation using PollingDevice.
 :license: MPL-2.0, see LICENSE for more details.
 """
 
+import asyncio
 import logging
 from typing import Any
 
-from ucapi_framework import DeviceEvents, PollingDevice
+from ucapi_framework import PollingDevice
 
 from uc_intg_cctv.client import CCTVClient, optimize_image
 from uc_intg_cctv.config import CCTVConfig
@@ -17,7 +18,8 @@ from uc_intg_cctv.const import MAX_CONSECUTIVE_FAILURES
 _LOG = logging.getLogger(__name__)
 
 
-RECONNECT_INTERVAL = 30
+RECONNECT_MIN = 30
+RECONNECT_MAX = 600
 
 
 class CCTVDevice(PollingDevice):
@@ -27,6 +29,7 @@ class CCTVDevice(PollingDevice):
         super().__init__(device_config, poll_interval=device_config.refresh_rate, **kwargs)
         self._config = device_config
         self._client: CCTVClient | None = None
+        self._connect_lock: asyncio.Lock = asyncio.Lock()
         self._state: str = "UNAVAILABLE"
         self._streaming: bool = False
         self._current_camera_index: int = 0
@@ -34,6 +37,8 @@ class CCTVDevice(PollingDevice):
         self._camera_names: list[str] = [c.get("name", "") for c in device_config.cameras]
         self._consecutive_failures: int = 0
         self._reconnect_poll_count: int = 0
+        self._reconnect_delay: int = RECONNECT_MIN
+        self._last_auth_terminal: bool = False
         self._was_streaming: bool = False
 
     @property
@@ -78,40 +83,65 @@ class CCTVDevice(PollingDevice):
     def streaming(self) -> bool:
         return self._streaming
 
+    def _persist_auth(self, sid: str | None, device_id: str | None, syno_token: str | None) -> None:
+        """Persist refreshed Synology credentials to disk so they survive reboots."""
+        if self._config.source_type != "synology":
+            return
+        changes: dict[str, str] = {}
+        if sid and sid != self._config.synology_sid:
+            changes["synology_sid"] = sid
+        if device_id and device_id != self._config.synology_device_id:
+            changes["synology_device_id"] = device_id
+        if (syno_token or "") != self._config.synology_syno_token:
+            changes["synology_syno_token"] = syno_token or ""
+        if not changes:
+            return
+        try:
+            self.update_config(**changes)
+        except Exception as err:
+            _LOG.warning("%s Failed to persist Synology credentials: %s", self.log_id, err)
+
     async def establish_connection(self) -> CCTVClient:
-        """Connect to camera source (validate manual URLs or authenticate Synology)."""
-        stored_sid = self._config.synology_sid if self._config.source_type == "synology" else None
-        device_id = self._config.synology_device_id if self._config.source_type == "synology" else None
-        self._client = CCTVClient(self._config, stored_sid=stored_sid, device_id=device_id)
-        if not await self._client.connect():
-            await self._client.close()
-            self._client = None
-            raise ConnectionError(f"Cannot connect to {self._config.source_type} camera source")
+        """Connect to camera source (validate manual URLs or authenticate Synology).
 
-        if self._config.source_type == "synology":
-            if self._client.session_id:
-                self._config.synology_sid = self._client.session_id
-            if self._client.device_id:
-                self._config.synology_device_id = self._client.device_id
+        Idempotent and concurrent-safe (framework may call this twice): one client per
+        device lifetime, guarded by the connect lock.
+        """
+        async with self._connect_lock:
+            if self._client is None:
+                synology = self._config.source_type == "synology"
+                self._client = CCTVClient(
+                    self._config,
+                    stored_sid=self._config.synology_sid if synology else None,
+                    device_id=self._config.synology_device_id if synology else None,
+                    stored_syno_token=self._config.synology_syno_token if synology else None,
+                    on_auth=self._persist_auth,
+                )
 
-        _LOG.info("%s Connected to %s source with %d cameras",
-                  self.log_id, self._config.source_type, len(self._camera_names))
+            if not await self._client.connect():
+                self._last_auth_terminal = self._client.last_error_terminal
+                await self._client.close(logout=False)
+                self._client = None
+                raise ConnectionError(f"Cannot connect to {self._config.source_type} camera source")
 
-        self._state = "ON"
-        self._consecutive_failures = 0
-        self.push_update()
-        return self._client
+            self._last_auth_terminal = False
+            if self._config.source_type == "synology":
+                self._persist_auth(
+                    self._client.session_id, self._client.device_id, self._client.syno_token
+                )
+
+            _LOG.info("%s Connected to %s source with %d cameras",
+                      self.log_id, self._config.source_type, len(self._camera_names))
+
+            self._state = "ON"
+            self._consecutive_failures = 0
+            self._reconnect_delay = RECONNECT_MIN
+            self.push_update()
+            return self._client
 
     async def _try_reconnect(self) -> bool:
         """Attempt to reconnect to the camera source."""
         _LOG.info("%s Attempting reconnection", self.log_id)
-        if self._client:
-            try:
-                await self._client.close(logout=False)
-            except Exception:
-                pass
-            self._client = None
-
         try:
             await self.establish_connection()
             _LOG.info("%s Reconnected successfully", self.log_id)
@@ -126,10 +156,17 @@ class CCTVDevice(PollingDevice):
         """Fetch snapshot for current camera if streaming is active."""
         if self._state == "UNAVAILABLE":
             self._reconnect_poll_count += 1
-            polls_needed = RECONNECT_INTERVAL // max(self._config.refresh_rate, 1)
-            if self._reconnect_poll_count >= max(polls_needed, 3):
+            polls_needed = max(self._reconnect_delay // max(self._config.refresh_rate, 1), 3)
+            if self._reconnect_poll_count >= polls_needed:
                 self._reconnect_poll_count = 0
-                await self._try_reconnect()
+                if await self._try_reconnect():
+                    self._reconnect_delay = RECONNECT_MIN
+                elif self._last_auth_terminal:
+                    _LOG.error("%s DSM blocked/locked this device; backing off %ds",
+                               self.log_id, RECONNECT_MAX)
+                    self._reconnect_delay = RECONNECT_MAX
+                else:
+                    self._reconnect_delay = min(self._reconnect_delay * 2, RECONNECT_MAX)
             return
 
         if not self._client:
@@ -202,8 +239,9 @@ class CCTVDevice(PollingDevice):
         self._was_streaming = self._streaming
         self._streaming = False
         self._snapshot_base64 = ""
-        if self._client:
-            await self._client.close(logout=False)
-            self._client = None
+        async with self._connect_lock:
+            if self._client:
+                await self._client.close(logout=False)
+                self._client = None
         self._state = "UNAVAILABLE"
         await super().disconnect()

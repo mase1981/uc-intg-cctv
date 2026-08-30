@@ -26,4 +26,5 @@ class CCTVConfig:
     otp_enabled: bool = False
     synology_sid: str = ""
     synology_device_id: str = ""
+    synology_syno_token: str = ""
     refresh_rate: int = DEFAULT_REFRESH_RATE
