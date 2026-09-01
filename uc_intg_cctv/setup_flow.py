@@ -51,11 +51,16 @@ class CCTVSetupFlow(BaseSetupFlow[CCTVConfig]):
         self, input_values: dict[str, Any]
     ) -> CCTVConfig | RequestUserInput:
         """Process setup input through multiple steps."""
-        source_type = input_values.get("source_type", SOURCE_MANUAL)
+        if "source_type" in input_values or not hasattr(self, "_setup_state"):
+            self._setup_state: dict[str, Any] = {}
+        self._setup_state.update(input_values)
+        state = self._setup_state
+
+        source_type = state.get("source_type", SOURCE_MANUAL)
 
         if source_type == SOURCE_SYNOLOGY:
-            return await self._handle_synology_flow(input_values)
-        return await self._handle_manual_flow(input_values)
+            return await self._handle_synology_flow(state)
+        return await self._handle_manual_flow(state)
 
     # --- Manual URL Flow ---
 
@@ -137,6 +142,8 @@ class CCTVSetupFlow(BaseSetupFlow[CCTVConfig]):
         identifier = f"cctv_{name.lower().replace(' ', '_').replace('.', '_')}"
 
         _LOG.info("Manual setup complete: %s with %d cameras", name, len(cameras))
+
+        self._setup_state = {}
 
         return CCTVConfig(
             identifier=identifier,
@@ -256,6 +263,8 @@ class CCTVSetupFlow(BaseSetupFlow[CCTVConfig]):
             syno_token = client.syno_token or ""
 
             _LOG.info("Synology setup complete: %s with %d cameras", name, len(camera_list))
+
+            self._setup_state = {}
 
             return CCTVConfig(
                 identifier=identifier,
