@@ -19,6 +19,8 @@ import io
 import json as _json
 import logging
 import ssl
+import time
+from concurrent.futures import Future
 from typing import Any, Callable
 
 import aiohttp
@@ -43,6 +45,13 @@ from uc_intg_cctv.const import (
 )
 
 _LOG = logging.getLogger(__name__)
+
+# RTSP frame grab limits. A grab runs in a worker thread that cannot be cancelled,
+# so it must end on its own: the socket timeout bounds a stalled stream and the
+# decode deadline bounds a stream that sends data but no usable frame.
+RTSP_SOCKET_TIMEOUT_US = 5_000_000
+RTSP_DECODE_DEADLINE = 13.0
+RTSP_GRAB_TIMEOUT = 15.0
 
 
 class SynologyError(Exception):
@@ -123,6 +132,12 @@ class CCTVClient:
         self._reauth_lock = asyncio.Lock()
         self._last_error_terminal: bool = False
         self._credential_error: CredentialError | None = None
+        self._rtsp_inflight: Future | None = None
+
+    @property
+    def rtsp_busy(self) -> bool:
+        """True while an RTSP frame grab thread is still running."""
+        return self._rtsp_inflight is not None and not self._rtsp_inflight.done()
 
     @property
     def session_id(self) -> str | None:
@@ -203,6 +218,8 @@ class CCTVClient:
             video_codec = camera.get("video_codec", 0)
 
             if video_codec == CODEC_H265:
+                if self.rtsp_busy:
+                    return None  # previous grab still finishing; the device skips this cycle
                 data = await self._rtsp_frame_grab(camera_id)
                 if data:
                     return data
@@ -642,12 +659,17 @@ class CCTVClient:
             _LOG.debug("No RTSP URL for camera %d", camera_id)
             return None
 
-        loop = asyncio.get_event_loop()
+        # One grab at a time: a grab that outlived its timeout keeps its thread, so
+        # starting another would pile up decoders (H.265 decoding is heavy on the Remote).
+        if self.rtsp_busy:
+            _LOG.debug("Previous RTSP grab still running, skipping camera %d this cycle", camera_id)
+            return None
+
+        loop = asyncio.get_running_loop()
+        future = loop.run_in_executor(None, self._rtsp_grab_sync, rtsp_url, camera_id)
+        self._rtsp_inflight = future
         try:
-            data = await asyncio.wait_for(
-                loop.run_in_executor(None, self._rtsp_grab_sync, rtsp_url, camera_id),
-                timeout=15,
-            )
+            data = await asyncio.wait_for(asyncio.shield(future), timeout=RTSP_GRAB_TIMEOUT)
             return data
         except asyncio.TimeoutError:
             _LOG.debug("RTSP frame grab timeout for camera %d", camera_id)
@@ -658,20 +680,40 @@ class CCTVClient:
 
     @staticmethod
     def _rtsp_grab_sync(rtsp_url: str, camera_id: int) -> bytes | None:
-        """Synchronous RTSP frame grab using PyAV (runs in executor)."""
+        """Synchronous RTSP frame grab using PyAV (runs in executor).
+
+        Decodes key frames only (a clean picture, and far less work than decoding
+        every frame of an H.265 stream) and scales the frame down to the Remote's
+        display size here, off the event loop.
+        """
         container = None
         try:
+            # "timeout" is the RTSP socket timeout; the older "stimeout" name is
+            # ignored by FFmpeg 5+, which left a stalled stream hanging forever.
             container = av.open(
                 rtsp_url,
-                options={"rtsp_transport": "tcp", "stimeout": "10000000"},
+                options={"rtsp_transport": "tcp", "timeout": str(RTSP_SOCKET_TIMEOUT_US)},
+                timeout=RTSP_SOCKET_TIMEOUT_US / 1_000_000,
             )
-            for frame in container.decode(video=0):
-                pil_image = frame.to_image()
-                buf = io.BytesIO()
-                pil_image.save(buf, format="JPEG", quality=85)
-                jpeg_bytes = buf.getvalue()
-                _LOG.debug("RTSP frame grab success for camera %d: %d bytes", camera_id, len(jpeg_bytes))
-                return jpeg_bytes
+            stream = container.streams.video[0]
+            stream.codec_context.skip_frame = "NONKEY"
+            stream.codec_context.thread_type = "AUTO"
+            deadline = time.monotonic() + RTSP_DECODE_DEADLINE
+            for packet in container.demux(stream):
+                if time.monotonic() > deadline:
+                    _LOG.debug("RTSP stream gave no key frame in %.0fs for camera %d", RTSP_DECODE_DEADLINE, camera_id)
+                    return None
+                for frame in packet.decode():
+                    scale = min(DISPLAY_WIDTH / frame.width, DISPLAY_HEIGHT / frame.height, 1.0)
+                    pil_image = frame.to_image(
+                        width=max(1, round(frame.width * scale)),
+                        height=max(1, round(frame.height * scale)),
+                    )
+                    buf = io.BytesIO()
+                    pil_image.save(buf, format="JPEG", quality=85)
+                    jpeg_bytes = buf.getvalue()
+                    _LOG.debug("RTSP frame grab success for camera %d: %d bytes", camera_id, len(jpeg_bytes))
+                    return jpeg_bytes
             _LOG.debug("RTSP stream yielded no frames for camera %d", camera_id)
             return None
         except Exception as err:

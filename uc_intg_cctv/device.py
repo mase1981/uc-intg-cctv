@@ -44,6 +44,7 @@ class CCTVDevice(PollingDevice):
         self._connect_lock: asyncio.Lock = asyncio.Lock()
         self._state: str = "UNAVAILABLE"
         self._streaming: bool = False
+        self._snapshot_lock = asyncio.Lock()  # one snapshot fetch at a time
         self._current_camera_index: int = 0
         self._snapshot_base64: str = ""
         self._camera_names: list[str] = [c.get("name", "") for c in device_config.cameras]
@@ -235,8 +236,19 @@ class CCTVDevice(PollingDevice):
         if not cameras or self._current_camera_index >= len(cameras):
             return
 
-        camera = cameras[self._current_camera_index]
-        snapshot_data = await self._client.get_snapshot(camera)
+        # A camera switch also fetches right away; don't run a second fetch next to the poll's.
+        if self._snapshot_lock.locked():
+            return
+        async with self._snapshot_lock:
+            index = self._current_camera_index
+            snapshot_data = await self._client.get_snapshot(cameras[index])
+            if index != self._current_camera_index:
+                return  # the user switched camera meanwhile; the next poll fetches the new one
+            if not snapshot_data and self._client and self._client.rtsp_busy:
+                return  # an earlier frame grab is still finishing: not a failure, try next poll
+            await self._handle_snapshot(snapshot_data)
+
+    async def _handle_snapshot(self, snapshot_data: bytes | None) -> None:
         if self._client and self._client.credential_error:
             self._set_needs_setup(str(self._client.credential_error))
             self._snapshot_base64 = ""
@@ -244,7 +256,9 @@ class CCTVDevice(PollingDevice):
             return
 
         if snapshot_data:
-            optimized = optimize_image(snapshot_data)
+            # Image decoding/resizing is CPU work: keep it off the event loop so the
+            # connection to the Remote stays responsive.
+            optimized = await asyncio.to_thread(optimize_image, snapshot_data)
             if optimized:
                 self._snapshot_base64 = optimized
                 self._consecutive_failures = 0
