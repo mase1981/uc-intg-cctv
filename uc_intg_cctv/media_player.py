@@ -81,8 +81,8 @@ class CCTVMediaPlayer(MediaPlayerEntity):
                 case media_player.Commands.PLAY_PAUSE | media_player.Commands.TOGGLE:
                     return StatusCodes.OK
                 case media_player.Commands.ON:
-                    if not self._device.streaming:
-                        await self._device.start_streaming()
+                    if not self._device.streaming and not await self._device.start_streaming():
+                        return StatusCodes.SERVICE_UNAVAILABLE
                 case media_player.Commands.OFF:
                     await self._device.stop_streaming()
                 case media_player.Commands.SELECT_SOURCE:
@@ -90,8 +90,8 @@ class CCTVMediaPlayer(MediaPlayerEntity):
                     names = self._device.camera_names
                     if source in names:
                         await self._device.select_camera(names.index(source))
-                        if not self._device.streaming:
-                            await self._device.start_streaming()
+                        if not self._device.streaming and not await self._device.start_streaming():
+                            return StatusCodes.SERVICE_UNAVAILABLE
                     else:
                         return StatusCodes.BAD_REQUEST
                 case _:

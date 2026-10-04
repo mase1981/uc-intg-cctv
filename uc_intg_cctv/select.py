@@ -63,21 +63,20 @@ class CameraSelect(SelectEntity):
                 option = params.get("option", "") if params else ""
                 if option in names:
                     await self._device.select_camera(names.index(option))
-                    if not self._device.streaming:
-                        await self._device.start_streaming()
-                    return StatusCodes.OK
+                    return await self._ensure_streaming()
                 return StatusCodes.BAD_REQUEST
             case select.Commands.SELECT_NEXT:
                 idx = (self._device.current_camera_index + 1) % len(names)
                 await self._device.select_camera(idx)
-                if not self._device.streaming:
-                    await self._device.start_streaming()
-                return StatusCodes.OK
+                return await self._ensure_streaming()
             case select.Commands.SELECT_PREVIOUS:
                 idx = (self._device.current_camera_index - 1) % len(names)
                 await self._device.select_camera(idx)
-                if not self._device.streaming:
-                    await self._device.start_streaming()
-                return StatusCodes.OK
+                return await self._ensure_streaming()
             case _:
                 return StatusCodes.NOT_IMPLEMENTED
+
+    async def _ensure_streaming(self) -> StatusCodes:
+        if self._device.streaming or await self._device.start_streaming():
+            return StatusCodes.OK
+        return StatusCodes.SERVICE_UNAVAILABLE

@@ -1,17 +1,26 @@
 """
 CCTV device implementation using PollingDevice.
 
+Connecting never raises: the framework does not retry a connect that raised, so a
+Remote waking before its Wi-Fi is back (or a NAS still booting) used to leave the
+cameras unavailable until the next reboot. Instead the device stays UNAVAILABLE
+and the poll loop reconnects with backoff. A login DSM rejects (password, 2FA,
+disabled account) is not retried at all: every failed login counts towards DSM's
+auto-block. Running setup again (Update) fixes it without removing anything.
+While idle, a keep-alive every few minutes keeps the Synology session warm.
+
 :copyright: (c) 2026 by Meir Miyara.
 :license: MPL-2.0, see LICENSE for more details.
 """
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 from ucapi_framework import PollingDevice
 
-from uc_intg_cctv.client import CCTVClient, optimize_image
+from uc_intg_cctv.client import CCTVClient, CredentialError, optimize_image
 from uc_intg_cctv.config import CCTVConfig
 from uc_intg_cctv.const import MAX_CONSECUTIVE_FAILURES
 
@@ -20,6 +29,9 @@ _LOG = logging.getLogger(__name__)
 
 RECONNECT_MIN = 30
 RECONNECT_MAX = 600
+STARTUP_ATTEMPTS = 3  # the Remote's Wi-Fi may still be coming back after standby
+STARTUP_RETRY_DELAY = 5.0
+KEEPALIVE_INTERVAL = 300  # seconds between Synology keep-alives while not streaming
 
 
 class CCTVDevice(PollingDevice):
@@ -40,6 +52,8 @@ class CCTVDevice(PollingDevice):
         self._reconnect_delay: int = RECONNECT_MIN
         self._last_auth_terminal: bool = False
         self._was_streaming: bool = False
+        self._needs_setup: str = ""  # why DSM rejected the login (setup > Update fixes it)
+        self._last_keepalive: float = time.monotonic()
 
     @property
     def identifier(self) -> str:
@@ -83,6 +97,10 @@ class CCTVDevice(PollingDevice):
     def streaming(self) -> bool:
         return self._streaming
 
+    @property
+    def needs_setup(self) -> str:
+        return self._needs_setup
+
     def _persist_auth(self, sid: str | None, device_id: str | None, syno_token: str | None) -> None:
         """Persist refreshed Synology credentials to disk so they survive reboots."""
         if self._config.source_type != "synology":
@@ -101,11 +119,22 @@ class CCTVDevice(PollingDevice):
         except Exception as err:
             _LOG.warning("%s Failed to persist Synology credentials: %s", self.log_id, err)
 
-    async def establish_connection(self) -> CCTVClient:
-        """Connect to camera source (validate manual URLs or authenticate Synology).
+    async def establish_connection(self) -> CCTVClient | None:
+        """Connect to the camera source; never raises (see module docstring)."""
+        for attempt in range(1, STARTUP_ATTEMPTS + 1):
+            if await self._connect_once():
+                break
+            if self._needs_setup or self._last_auth_terminal or attempt == STARTUP_ATTEMPTS:
+                break
+            await asyncio.sleep(STARTUP_RETRY_DELAY)
+        self.push_update()
+        return self._client
 
-        Idempotent and concurrent-safe (framework may call this twice): one client per
-        device lifetime, guarded by the connect lock.
+    async def _connect_once(self) -> bool:
+        """One connect attempt (validate manual URLs or log in to Synology). Returns success.
+
+        Concurrent-safe (the framework may call connect twice): one client per device,
+        guarded by the connect lock.
         """
         async with self._connect_lock:
             if self._client is None:
@@ -118,13 +147,24 @@ class CCTVDevice(PollingDevice):
                     on_auth=self._persist_auth,
                 )
 
-            if not await self._client.connect():
+            try:
+                connected = await self._client.connect()
+            except CredentialError as err:
+                self._set_needs_setup(str(err))
+                connected = False
+            except ValueError as err:  # e.g. DSM auto-blocked this device
+                _LOG.error("%s %s", self.log_id, err)
+                connected = False
+
+            if not connected:
                 self._last_auth_terminal = self._client.last_error_terminal
                 await self._client.close(logout=False)
                 self._client = None
-                raise ConnectionError(f"Cannot connect to {self._config.source_type} camera source")
+                self._state = "UNAVAILABLE"
+                return False
 
             self._last_auth_terminal = False
+            self._needs_setup = ""
             if self._config.source_type == "synology":
                 self._persist_auth(
                     self._client.session_id, self._client.device_id, self._client.syno_token
@@ -136,25 +176,39 @@ class CCTVDevice(PollingDevice):
             self._state = "ON"
             self._consecutive_failures = 0
             self._reconnect_delay = RECONNECT_MIN
+            self._last_keepalive = time.monotonic()
             self.push_update()
-            return self._client
+            return True
+
+    def _set_needs_setup(self, reason: str) -> None:
+        if self._needs_setup != reason:
+            _LOG.error(
+                "%s DSM rejected the login: %s. Automatic retries are paused so DSM does not "
+                "block this Remote. Fix it by running the integration setup again and choosing "
+                "Update (no need to remove the integration).",
+                self.log_id, reason,
+            )
+        self._needs_setup = reason
+        self._state = "UNAVAILABLE"
+        self._streaming = False
 
     async def _try_reconnect(self) -> bool:
         """Attempt to reconnect to the camera source."""
         _LOG.info("%s Attempting reconnection", self.log_id)
-        try:
-            await self.establish_connection()
+        if await self._connect_once():
             _LOG.info("%s Reconnected successfully", self.log_id)
             if self._was_streaming:
+                self._was_streaming = False
                 await self.start_streaming()
             return True
-        except Exception as err:
-            _LOG.warning("%s Reconnection failed: %s", self.log_id, err)
-            return False
+        _LOG.warning("%s Reconnection failed", self.log_id)
+        return False
 
     async def poll_device(self) -> None:
         """Fetch snapshot for current camera if streaming is active."""
         if self._state == "UNAVAILABLE":
+            if self._needs_setup:
+                return  # waiting for setup > Update; retrying would risk a DSM auto-block
             self._reconnect_poll_count += 1
             polls_needed = max(self._reconnect_delay // max(self._config.refresh_rate, 1), 3)
             if self._reconnect_poll_count >= polls_needed:
@@ -173,6 +227,7 @@ class CCTVDevice(PollingDevice):
             return
 
         if not self._streaming:
+            await self._keep_alive()
             self.push_update()
             return
 
@@ -182,6 +237,11 @@ class CCTVDevice(PollingDevice):
 
         camera = cameras[self._current_camera_index]
         snapshot_data = await self._client.get_snapshot(camera)
+        if self._client and self._client.credential_error:
+            self._set_needs_setup(str(self._client.credential_error))
+            self._snapshot_base64 = ""
+            self.push_update()
+            return
 
         if snapshot_data:
             optimized = optimize_image(snapshot_data)
@@ -205,14 +265,36 @@ class CCTVDevice(PollingDevice):
             self._reconnect_poll_count = 0
             self.push_update()
 
-    async def start_streaming(self) -> None:
-        """Start fetching snapshots on each poll cycle."""
+    async def _keep_alive(self) -> None:
+        """Keep the Synology session warm while nobody is watching (silent re-login if needed)."""
+        if self._config.source_type != "synology" or not self._client:
+            return
+        if time.monotonic() - self._last_keepalive < KEEPALIVE_INTERVAL:
+            return
+        self._last_keepalive = time.monotonic()
+        if await self._client.keep_alive():
+            return
+        if self._client.credential_error:
+            self._set_needs_setup(str(self._client.credential_error))
+        else:
+            _LOG.warning("%s Keep-alive failed, will reconnect", self.log_id)
+            self._state = "UNAVAILABLE"
+            self._reconnect_poll_count = 0
+
+    async def start_streaming(self) -> bool:
+        """Start fetching snapshots on each poll cycle. Returns False if the source is unavailable."""
+        if self._client is None or self._state == "UNAVAILABLE":
+            # Pressing play is the best moment to reconnect (unless DSM rejected the login).
+            if self._needs_setup or not await self._try_reconnect():
+                self.push_update()
+                return False
         self._streaming = True
         self._state = "PLAYING"
         self._consecutive_failures = 0
         self._snapshot_base64 = ""
         _LOG.info("%s Started streaming camera: %s", self.log_id, self.current_camera_name)
         await self.poll_device()
+        return True
 
     async def stop_streaming(self) -> None:
         """Stop fetching snapshots."""

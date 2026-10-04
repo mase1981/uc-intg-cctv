@@ -89,6 +89,10 @@ docker run -d --name uc-cctv --restart unless-stopped --network host -v cctv-con
 4. All cameras are auto-discovered with names from Surveillance Station
 5. H.264 cameras use Synology's snapshot API, H.265 cameras use RTSP frame extraction
 
+**Staying signed in:** the integration keeps its Synology session alive, signs in again on its own when DSM ends the session, and uses a trusted-device token so 2FA is only asked once. If the NAS is off or unreachable, it reconnects by itself when it's back.
+
+**Changed your password or 2FA?** Run the integration setup again and choose **Update**. Your saved settings are filled in (leave the password empty to keep the current one), and your cameras and activities stay as they are; there's no need to remove the integration. Until then, the integration stops trying to sign in, so DSM doesn't block the Remote for too many failed logins.
+
 ### Manual URL
 
 1. Add the integration on your Remote

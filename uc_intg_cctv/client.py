@@ -53,6 +53,18 @@ class SynologyError(Exception):
         super().__init__(f"Synology API error {code}: {message}" if message else f"Synology API error {code}")
 
 
+class CredentialError(ValueError):
+    """DSM rejected the login itself (password, 2FA, disabled account).
+
+    Retrying cannot fix it and every failed login counts towards DSM's auto-block,
+    so the device stops retrying until setup is run again (Update).
+    """
+
+    def __init__(self, code: int, message: str) -> None:
+        self.code = code
+        super().__init__(message)
+
+
 def _create_ssl_context() -> ssl.SSLContext:
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
@@ -110,6 +122,7 @@ class CCTVClient:
         self._auth_version: int | None = None
         self._reauth_lock = asyncio.Lock()
         self._last_error_terminal: bool = False
+        self._credential_error: CredentialError | None = None
 
     @property
     def session_id(self) -> str | None:
@@ -122,6 +135,11 @@ class CCTVClient:
     @property
     def syno_token(self) -> str | None:
         return self._synology_syno_token
+
+    @property
+    def credential_error(self) -> "CredentialError | None":
+        """Set when DSM rejected a silent re-login (needs setup > Update)."""
+        return self._credential_error
 
     @property
     def last_error_terminal(self) -> bool:
@@ -199,6 +217,19 @@ class CCTVClient:
             return await self._rtsp_frame_grab(camera_id)
 
         return await self._http_get_snapshot(camera.get("url", ""))
+
+    async def keep_alive(self) -> bool:
+        """Light call that keeps the DSM session warm; re-logs in silently if it expired."""
+        if self._config.source_type != SOURCE_SYNOLOGY:
+            return True
+        if not self._session or not self._synology_sid:
+            return False
+        try:
+            await self._synology_json("SYNO.SurveillanceStation.Camera", "List", 1, {"limit": "1"})
+            return True
+        except Exception as err:  # pylint: disable=broad-exception-caught
+            _LOG.debug("Keep-alive failed: %s", err)
+            return False
 
     async def discover_cameras(self) -> list[dict]:
         """Discover cameras from Synology Surveillance Station (v9 for codec info)."""
@@ -364,13 +395,13 @@ class CCTVClient:
             self._last_error_terminal = code in SYNOLOGY_TERMINAL_CODES
             _LOG.error("Synology auth error: code %s", code)
             if code == 403:
-                raise ValueError("2FA is enabled but no OTP code was provided")
+                raise CredentialError(code, "2FA is enabled but no OTP code was provided")
             if code == 404:
-                raise ValueError("OTP code is incorrect")
+                raise CredentialError(code, "OTP code is incorrect")
             if code == 400:
-                raise ValueError("Invalid username or password")
+                raise CredentialError(code, "Invalid username or password")
             if code in (401, 411):
-                raise ValueError("Account disabled or locked")
+                raise CredentialError(code, "Account disabled or locked")
             if code == 407:
                 raise ValueError(
                     "Too many failed attempts - DSM temporarily blocked this device. "
@@ -418,6 +449,10 @@ class CCTVClient:
             self._synology_sid = None
             try:
                 return await self._synology_authenticate()
+            except CredentialError as err:
+                _LOG.error("Re-authentication rejected by DSM: %s", err)
+                self._credential_error = err
+                return False
             except (ValueError, SynologyError) as err:
                 _LOG.warning("Re-authentication failed: %s", err)
                 return False
