@@ -37,25 +37,57 @@ jobs:
             --user=$(id -u):$(id -g) \
             -v ${GITHUB_WORKSPACE}:/workspace \
             docker.io/unfoldedcircle/r2-pyinstaller:${PYTHON_VER} \
-            bash -c \
-            "cd /workspace && \
-              python -m pip install -r requirements.txt && \
-              pyinstaller --clean --onedir --name driver \
+            bash -euo pipefail -c '
+              FF_VER=7.1.1
+              FF_PREFIX=/workspace/ffbuild
+
+              # Build a minimal, decode-only FFmpeg (H.264 + H.265 over RTSP).
+              # PyAV is compiled against this instead of its prebuilt wheel, which
+              # bundles every codec/encoder and inflates the release past the size
+              # the integration manager can install in-place.
+              cd /tmp
+              curl -fsSL "https://ffmpeg.org/releases/ffmpeg-${FF_VER}.tar.xz" -o ffmpeg.tar.xz
+              tar xf ffmpeg.tar.xz
+              cd "ffmpeg-${FF_VER}"
+              ./configure \
+                --prefix="$FF_PREFIX" \
+                --enable-shared --disable-static \
+                --disable-programs --disable-doc --disable-htmlpages --disable-manpages --disable-podpages --disable-txtpages \
+                --disable-everything \
+                --enable-decoder=hevc,h264 \
+                --enable-parser=hevc,h264 \
+                --enable-demuxer=rtsp,sdp,rtp,mpegts,h264,hevc \
+                --enable-protocol=file,tcp,udp,rtp \
+                --enable-bsf=extract_extradata,h264_mp4toannexb,hevc_mp4toannexb \
+                --enable-network \
+                --enable-swscale --enable-swresample \
+                --enable-small --disable-debug
+              make -j"$(nproc)"
+              make install
+
+              export PKG_CONFIG_PATH="$FF_PREFIX/lib/pkgconfig"
+              export LD_LIBRARY_PATH="$FF_PREFIX/lib:${LD_LIBRARY_PATH:-}"
+
+              cd /workspace
+              python -m pip install --no-binary=av -r requirements.txt
+
+              pyinstaller --clean --onedir --name driver --strip \
                 --add-data driver.json:. \
                 --collect-all zeroconf \
                 --collect-all ucapi \
                 --collect-all ucapi_framework \
                 --collect-all av \
-                --hidden-import uc_intg_${INTG_NAME}.driver \
-                --hidden-import uc_intg_${INTG_NAME}.device \
-                --hidden-import uc_intg_${INTG_NAME}.config \
-                --hidden-import uc_intg_${INTG_NAME}.client \
-                --hidden-import uc_intg_${INTG_NAME}.setup_flow \
-                --hidden-import uc_intg_${INTG_NAME}.const \
-                --hidden-import uc_intg_${INTG_NAME}.media_player \
-                --hidden-import uc_intg_${INTG_NAME}.select \
+                --hidden-import uc_intg_cctv.driver \
+                --hidden-import uc_intg_cctv.device \
+                --hidden-import uc_intg_cctv.config \
+                --hidden-import uc_intg_cctv.client \
+                --hidden-import uc_intg_cctv.setup_flow \
+                --hidden-import uc_intg_cctv.const \
+                --hidden-import uc_intg_cctv.media_player \
+                --hidden-import uc_intg_cctv.select \
                 --paths . \
-                uc_intg_${INTG_NAME}/__init__.py"
+                uc_intg_cctv/__init__.py
+            '
 
       - name: Prepare artifacts
         run: |
