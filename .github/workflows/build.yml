@@ -46,9 +46,9 @@ jobs:
               # bundles every codec/encoder and inflates the release past the size
               # the integration manager can install in-place.
               cd /tmp
-              curl -fsSL "https://ffmpeg.org/releases/ffmpeg-${FF_VER}.tar.xz" -o ffmpeg.tar.xz
-              tar xf ffmpeg.tar.xz
-              cd "ffmpeg-${FF_VER}"
+              curl -fsSL --retry 3 --retry-all-errors "https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n${FF_VER}.tar.gz" -o ffmpeg.tar.gz
+              tar xf ffmpeg.tar.gz
+              cd "FFmpeg-n${FF_VER}"
               ./configure \
                 --prefix="$FF_PREFIX" \
                 --enable-shared --disable-static \
